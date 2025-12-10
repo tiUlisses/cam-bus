@@ -1,0 +1,720 @@
+// internal/supervisor/supervisor.go
+package supervisor
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/shirou/gopsutil/v3/process"
+	"github.com/sua-org/cam-bus/internal/core"
+	"github.com/sua-org/cam-bus/internal/drivers"
+	"github.com/sua-org/cam-bus/internal/faceengine"
+	"github.com/sua-org/cam-bus/internal/mqttclient"
+)
+
+type Supervisor struct {
+	mqtt      *mqttclient.Client
+	baseTopic string
+
+	shard      string
+	faceEngine *faceengine.Engine
+
+	mu      sync.Mutex
+	workers map[string]*cameraWorker
+    statusInterval time.Duration
+    proc *process.Process // <- NOVO: processo do cam-bus para métricas
+}
+
+type cameraWorker struct {
+	info   core.CameraInfo
+	cancel context.CancelFunc
+    lastEventAt time.Time // última vez que vimos evento dessa câmera
+}
+
+type workerSnapshot struct {
+    Info        core.CameraInfo
+    LastEventAt time.Time
+}
+
+func (s *Supervisor) snapshotWorkers() []workerSnapshot {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+
+    out := make([]workerSnapshot, 0, len(s.workers))
+    for _, w := range s.workers {
+        out = append(out, workerSnapshot{
+            Info:        w.info,
+            LastEventAt: w.lastEventAt,
+        })
+    }
+    return out
+}
+
+// Atualiza última vez que recebemos evento dessa câmera
+func (s *Supervisor) touchWorker(key string) {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+
+    if w, ok := s.workers[key]; ok {
+        w.lastEventAt = time.Now().UTC()
+    }
+}
+
+func New(mqtt *mqttclient.Client, baseTopic string) *Supervisor {
+	baseTopic = strings.TrimSuffix(baseTopic, "/")
+
+	shard := os.Getenv("CAMBUS_SHARD")
+	if shard == "" {
+		log.Printf("[supervisor] CAMBUS_SHARD não definido (essa instância atende TODOS os shards)")
+	} else {
+		log.Printf("[supervisor] CAMBUS_SHARD=%s", shard)
+	}
+
+	fe := faceengine.NewFromEnv()
+	if fe == nil || !fe.Enabled() {
+		log.Printf("[supervisor] faceengine desabilitado (FACE_ENGINE vazio ou erro de config)")
+	} else {
+		log.Printf("[supervisor] faceengine habilitado (FACE_ENGINE=findface)")
+	}
+    statusInterval := envDurationSeconds("CAMBUS_STATUS_INTERVAL_SECONDS", 30*time.Second)
+    var procHandle *process.Process
+    
+	return &Supervisor{
+		mqtt:       mqtt,
+		baseTopic:  baseTopic,
+		shard:      shard,
+		faceEngine: fe,
+		workers:    make(map[string]*cameraWorker),
+        statusInterval: statusInterval,
+        proc:           procHandle,
+	}
+}
+
+func envDurationSeconds(key string, def time.Duration) time.Duration {
+    v := strings.TrimSpace(os.Getenv(key))
+    if v == "" {
+        return def
+    }
+    sec, err := strconv.Atoi(v)
+    if err != nil || sec <= 0 {
+        log.Printf("[supervisor] valor inválido em %s=%q, usando default %s", key, v, def)
+        return def
+    }
+    return time.Duration(sec) * time.Second
+}
+
+
+func hasAnalytic(info core.CameraInfo, name string) bool {
+    for _, a := range info.Analytics {
+        if strings.EqualFold(a, name) {
+            return true
+        }
+    }
+    return false
+}
+
+
+func slugForCamera(info core.CameraInfo) string {
+    base := fmt.Sprintf("rtls_%s_%s_%s_%s",
+        info.Tenant,
+        info.Building,
+        info.Floor,
+        info.DeviceID,
+    )
+    base = strings.ToLower(base)
+    base = strings.ReplaceAll(base, " ", "_")
+    base = strings.ReplaceAll(base, "-", "_")
+    return base
+}
+
+
+// publishHADiscovery publica entidades MQTT Discovery para o Home Assistant
+// para uma câmera que tenha analítico faceRecognized.
+func (s *Supervisor) publishHADiscovery(info core.CameraInfo) error {
+    if s.faceEngine == nil || !s.faceEngine.Enabled() {
+        return nil
+    }
+
+    // A câmera precisa gerar eventos de face (faceCapture ou FaceDetection),
+    // porque é isso que o faceengine consome para gerar faceRecognized.
+    if !(hasAnalytic(info, "faceCapture") || hasAnalytic(info, "FaceDetection")) {
+        return nil
+    }
+
+    slug := slugForCamera(info)
+    deviceID := "rtls_camera_" + slug
+
+    // tópico dos eventos de faceRecognized
+    eventTopic := s.eventTopic(info, "faceRecognized")
+
+    // objeto comum de device
+    deviceObj := map[string]interface{}{
+        "identifiers":  []string{deviceID},
+        "name":         fmt.Sprintf("Câmera %s (%s %s, %s)", info.DeviceID, info.Building, info.Floor, info.Tenant),
+        "manufacturer": info.Manufacturer,
+        "model":        info.Model,
+    }
+
+    // 1) Binary sensor: alerta FaceRecognized
+    binCfg := map[string]interface{}{
+        "name":              fmt.Sprintf("FaceRecognized %s", info.DeviceID),
+        "unique_id":         slug + "_face_recognized",
+        "state_topic":       eventTopic,
+        "value_template":    "{% if value_json.AnalyticType == 'faceRecognized' and value_json.Meta.eventState == 'active' %}ON{% else %}OFF{% endif %}",
+        "payload_on":        "ON",
+        "payload_off":       "OFF",
+        "expire_after":      10,
+        "json_attributes_topic": eventTopic,
+        "device":            deviceObj,
+        "origin": map[string]interface{}{
+            "name": "rtls-cam-bus",
+        },
+    }
+    if err := s.publishDiscoveryConfig("binary_sensor", slug+"_face_recognized", binCfg); err != nil {
+        return err
+    }
+
+    // 2) Sensor: CPF / ID pessoa
+    personCfg := map[string]interface{}{
+        "name":           fmt.Sprintf("Face Recognition CPF %s", info.DeviceID),
+        "unique_id":      slug + "_face_person",
+        "state_topic":    eventTopic,
+        "value_template": "{{ value_json.Meta.ff_person_name }}",
+        "icon":           "mdi:account",
+        "device":         deviceObj,
+        "origin": map[string]interface{}{
+            "name": "rtls-cam-bus",
+        },
+    }
+    if err := s.publishDiscoveryConfig("sensor", slug+"_face_person", personCfg); err != nil {
+        return err
+    }
+
+    // 3) Sensor: mensagem amigável
+    msgCfg := map[string]interface{}{
+        "name":           fmt.Sprintf("Face Recognition Msg %s", info.DeviceID),
+        "unique_id":      slug + "_face_message",
+        "state_topic":    eventTopic,
+        "value_template": "Reconhecido com a pessoa: {{ value_json.Meta.ff_person_name }}",
+        "icon":           "mdi:account-badge",
+        "device":         deviceObj,
+        "origin": map[string]interface{}{
+            "name": "rtls-cam-bus",
+        },
+    }
+    if err := s.publishDiscoveryConfig("sensor", slug+"_face_message", msgCfg); err != nil {
+        return err
+    }
+
+    // 4) Sensor: confiança
+    confCfg := map[string]interface{}{
+        "name":                fmt.Sprintf("Face Recognition Confiança %s", info.DeviceID),
+        "unique_id":           slug + "_face_confidence",
+        "state_topic":         eventTopic,
+        "value_template":      "{{ (value_json.Meta.ff_confidence * 100) | round(1) }}",
+        "unit_of_measurement": "%",
+        "icon":                "mdi:shield-half-full",
+        "device":              deviceObj,
+        "origin": map[string]interface{}{
+            "name": "rtls-cam-bus",
+        },
+    }
+    if err := s.publishDiscoveryConfig("sensor", slug+"_face_confidence", confCfg); err != nil {
+        return err
+    }
+
+    // 5) Sensor: horário
+    timeCfg := map[string]interface{}{
+        "name":           fmt.Sprintf("Face Recognition Horário %s", info.DeviceID),
+        "unique_id":      slug + "_face_time",
+        "state_topic":    eventTopic,
+        "device_class":   "timestamp",
+        "value_template": "{{ as_datetime(value_json.Timestamp) }}",
+        "device":         deviceObj,
+        "origin": map[string]interface{}{
+            "name": "rtls-cam-bus",
+        },
+    }
+    if err := s.publishDiscoveryConfig("sensor", slug+"_face_time", timeCfg); err != nil {
+        return err
+    }
+
+    // 6) Entidade de imagem: snapshot (corrigindo localhost -> minio)
+    imgCfg := map[string]interface{}{
+        "name":      fmt.Sprintf("Face Snapshot %s", info.DeviceID),
+        "unique_id": slug + "_face_snapshot",
+        "url_topic": eventTopic,
+        "url_template": "{{ value_json.SnapshotURL | replace('http://localhost:9000', 'http://minio:9000') }}",
+        "device":    deviceObj,
+        "origin": map[string]interface{}{
+            "name": "rtls-cam-bus",
+        },
+    }
+    if err := s.publishDiscoveryConfig("image", slug+"_face_snapshot", imgCfg); err != nil {
+        return err
+    }
+
+        // 7) Entidade de imagem: foto da base (card do FindFace)
+    dbImgCfg := map[string]interface{}{
+        "name":      fmt.Sprintf("Face DB Photo %s", info.DeviceID),
+        "unique_id": slug + "_face_db_photo",
+        "url_topic": eventTopic,
+        "url_template": "{{ value_json.Meta.ff_person_photo_url }}",
+        "device":    deviceObj,
+        "origin": map[string]interface{}{
+            "name": "rtls-cam-bus",
+        },
+    }
+    if err := s.publishDiscoveryConfig("image", slug+"_face_db_photo", dbImgCfg); err != nil {
+        return err
+    }
+
+    return nil
+}
+func (s *Supervisor) runStatusLoop(ctx context.Context) {
+    hostname, _ := os.Hostname()
+    ticker := time.NewTicker(s.statusInterval)
+    defer ticker.Stop()
+
+    log.Printf("[supervisor] status loop iniciado (intervalo=%s)", s.statusInterval)
+
+    for {
+        select {
+        case <-ctx.Done():
+            log.Printf("[supervisor] status loop encerrado (context canceled)")
+            return
+        case t := <-ticker.C:
+            s.publishStatuses(hostname, t)
+        }
+    }
+}
+
+func (s *Supervisor) publishStatuses(hostname string, now time.Time) {
+    workers := s.snapshotWorkers()
+    if len(workers) == 0 {
+        return
+    }
+
+    // NOVO: pegar métricas de CPU/Memória do processo cam-bus
+    var (
+        cpuPercent  float64
+        memPercent  float64
+        memRSSBytes uint64
+    )
+
+    if s.proc != nil {
+        if cpu, err := s.proc.CPUPercent(); err == nil {
+            cpuPercent = cpu
+        }
+        if memInfo, err := s.proc.MemoryInfo(); err == nil {
+            memRSSBytes = memInfo.RSS
+        }
+        if memP, err := s.proc.MemoryPercent(); err == nil {
+            memPercent = float64(memP)
+        }
+    }
+
+    // Agrupamento por tenant + building (collector em nível de prédio)
+    type buildingKey struct {
+        Tenant   string
+        Building string
+    }
+
+    buildingMap := make(map[buildingKey]int)
+
+    // 1) Status das câmeras
+    for _, w := range workers {
+        bk := buildingKey{
+            Tenant:   w.Info.Tenant,
+            Building: w.Info.Building,
+        }
+        buildingMap[bk]++
+
+        if err := s.publishCameraStatus(w.Info, w.LastEventAt, now); err != nil {
+            log.Printf("[status] erro ao publicar status da câmera %s: %v", s.keyFor(w.Info), err)
+        }
+    }
+
+    // 2) Status do collector por prédio
+    for bk, camCount := range buildingMap {
+        if err := s.publishCollectorStatusForBuilding(
+            bk.Tenant,
+            bk.Building,
+            hostname,
+            camCount,
+            cpuPercent,
+            memPercent,
+            memRSSBytes,
+            now,
+        ); err != nil {
+            log.Printf(
+                "[status] erro ao publicar status do collector para %s/%s: %v",
+                bk.Tenant, bk.Building, err,
+            )
+        }
+    }
+}
+
+func (s *Supervisor) publishCollectorStatusForBuilding(
+    tenant, building, hostname string,
+    cameras int,
+    cpuPercent float64,
+    memPercent float64,
+    memRSSBytes uint64,
+    now time.Time,
+) error {
+    payload := map[string]interface{}{
+        "collector":       "cam-bus",
+        "status":          "online",
+        "timestamp":       now.UTC().Format(time.RFC3339),
+        "hostname":        hostname,
+        "shard":           s.shard,
+        "cameras":         cameras,
+        "cpu_percent":     cpuPercent,
+        "memory_percent":  memPercent,
+        "memory_rss_bytes": memRSSBytes,
+    }
+
+    b, err := json.Marshal(payload)
+    if err != nil {
+        return fmt.Errorf("marshal collector status: %w", err)
+    }
+
+    topic := s.collectorStatusTopic(tenant, building)
+    if err := s.mqtt.Publish(topic, 1, true, b); err != nil {
+        return fmt.Errorf("publish collector status to %s: %w", topic, err)
+    }
+
+    log.Printf("[status] collector online -> %s", topic)
+    return nil
+}
+
+func (s *Supervisor) publishCameraStatus(
+    info core.CameraInfo,
+    lastEventAt time.Time,
+    now time.Time,
+) error {
+    payload := map[string]interface{}{
+        "tenant":      info.Tenant,
+        "building":    info.Building,
+        "floor":       info.Floor,
+        "device_type": info.DeviceType,
+        "device_id":   info.DeviceID,
+        "status":      "online",
+        "timestamp":   now.UTC().Format(time.RFC3339),
+    }
+
+    if !lastEventAt.IsZero() {
+        payload["last_event_at"] = lastEventAt.UTC().Format(time.RFC3339)
+    }
+    if info.Shard != "" {
+        payload["shard"] = info.Shard
+    }
+
+    b, err := json.Marshal(payload)
+    if err != nil {
+        return fmt.Errorf("marshal camera status: %w", err)
+    }
+
+    topic := s.cameraStatusTopic(info)
+    if err := s.mqtt.Publish(topic, 1, true, b); err != nil {
+        return fmt.Errorf("publish camera status to %s: %w", topic, err)
+    }
+
+    log.Printf("[status] camera status published -> %s", topic)
+    return nil
+}
+
+
+func (s *Supervisor) publishDiscoveryConfig(component, objectID string, cfg map[string]interface{}) error {
+    topic := fmt.Sprintf("homeassistant/%s/%s/config", component, objectID)
+    payload, err := json.Marshal(cfg)
+    if err != nil {
+        return fmt.Errorf("marshal discovery %s: %w", topic, err)
+    }
+
+    // retain=true para o HA "lembrar" das entidades mesmo se cam-bus reiniciar
+    if err := s.mqtt.Publish(topic, 1, true, payload); err != nil {
+        return fmt.Errorf("publish discovery %s: %w", topic, err)
+    }
+
+    log.Printf("[supervisor] published HA discovery for %s: %s", component, topic)
+    return nil
+}
+
+// Run assina os tópicos /info e gerencia as câmeras.
+func (s *Supervisor) Run(ctx context.Context) error {
+	infoTopic := fmt.Sprintf("%s/+/+/+/+/+/info", s.baseTopic) // rtls/cameras/tenant/building/floor/type/id/info
+	log.Printf("[supervisor] subscribing to info topic: %s", infoTopic)
+
+	if err := s.mqtt.Subscribe(infoTopic, 1, s.handleInfoMessage); err != nil {
+		return fmt.Errorf("subscribe error: %w", err)
+	}
+    if s.statusInterval > 0 {
+        go s.runStatusLoop(ctx)
+    }
+
+	<-ctx.Done()
+	log.Printf("[supervisor] context canceled, stopping all workers")
+	s.stopAll()
+	return nil
+}
+
+func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
+    // Esperado: base/tenant/building/floor/type/id/info
+    parts := strings.Split(topic, "/")
+    baseParts := strings.Split(s.baseTopic, "/")
+
+    if len(parts) < len(baseParts)+6 {
+        log.Printf("[supervisor] invalid info topic: %s", topic)
+        return
+    }
+
+    offset := len(baseParts)
+    tenant := parts[offset+0]
+    building := parts[offset+1]
+    floor := parts[offset+2]
+    devType := parts[offset+3]
+    devID := parts[offset+4]
+    // parts[offset+5] == "info"
+
+    var info core.CameraInfo
+    if err := json.Unmarshal(payload, &info); err != nil {
+        log.Printf("[supervisor] invalid JSON on %s: %v", topic, err)
+        return
+    }
+
+    info.Tenant = tenant
+    info.Building = building
+    info.Floor = floor
+    info.DeviceType = devType
+    info.DeviceID = devID
+
+    // TODO: filtro de shard, se quiser (shard por camera, etc.)
+
+    key := s.keyFor(info)
+
+    // Se a câmera estiver desabilitada, para worker
+    if !info.Enabled {
+        log.Printf("[supervisor] camera %s disabled via info topic, stopping worker", key)
+        s.stopCamera(key)
+        return
+    }
+
+    // Publica discovery para o Home Assistant (se tiver faceRecognized)
+    if err := s.publishHADiscovery(info); err != nil {
+        log.Printf("[supervisor] erro ao publicar discovery para %s: %v", key, err)
+    }
+
+    // Por fim, inicia/atualiza o worker normalmente
+    s.startOrUpdateCamera(info)
+}
+
+func (s *Supervisor) keyFor(info core.CameraInfo) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%s",
+		info.Tenant, info.Building, info.Floor, info.DeviceType, info.DeviceID)
+}
+
+// cameraInfoEqual compara se duas configs de câmera são equivalentes
+// para o propósito de decidir se precisamos reiniciar o driver.
+func cameraInfoEqual(a, b core.CameraInfo) bool {
+	if a.Tenant != b.Tenant ||
+		a.Building != b.Building ||
+		a.Floor != b.Floor ||
+		a.DeviceType != b.DeviceType ||
+		a.DeviceID != b.DeviceID ||
+		a.Manufacturer != b.Manufacturer ||
+		a.Model != b.Model ||
+		a.IP != b.IP ||
+		a.Username != b.Username ||
+		a.Password != b.Password ||
+		a.UseTLS != b.UseTLS ||
+		a.Enabled != b.Enabled ||
+		a.Shard != b.Shard {
+		return false
+	}
+
+	// compara analytics (se existir)
+	if len(a.Analytics) != len(b.Analytics) {
+		return false
+	}
+	for i := range a.Analytics {
+		if a.Analytics[i] != b.Analytics[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (s *Supervisor) startOrUpdateCamera(info core.CameraInfo) {
+	key := s.keyFor(info)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if w, ok := s.workers[key]; ok {
+		// Já existe worker para essa câmera.
+		if cameraInfoEqual(w.info, info) {
+			log.Printf("[supervisor] camera %s already running with same config, ignoring update", key)
+			return
+		}
+
+		// Config mudou => reinicia worker.
+		log.Printf("[supervisor] camera %s config changed, restarting worker", key)
+		w.cancel()
+		delete(s.workers, key)
+	}
+
+	drv, err := drivers.GetDriver(info)
+	if err != nil {
+		log.Printf("[supervisor] no driver for camera %s: %v", key, err)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	eventsCh := make(chan core.AnalyticEvent, 64)
+
+	worker := &cameraWorker{
+		info:   info,
+		cancel: cancel,
+	}
+
+	s.workers[key] = worker
+
+	log.Printf("[supervisor] starting camera worker %s (%s %s, shard=%s)", key, info.Manufacturer, info.Model, info.Shard)
+
+	// Goroutine que roda o driver (Hikvision, etc.)
+	go func() {
+		defer func() {
+			cancel()
+			close(eventsCh)
+		}()
+		if err := drv.Run(ctx, eventsCh); err != nil {
+			log.Printf("[worker %s] driver ended with error: %v", key, err)
+		} else {
+			log.Printf("[worker %s] driver ended gracefully", key)
+		}
+	}()
+
+	// Goroutine que publica eventos no MQTT e aciona o faceengine (para faceCapture)
+    // Goroutine que publica eventos no MQTT e aciona o faceengine
+    go func() {
+        for evt := range eventsCh {
+            // 1) publica evento original (faceCapture, FaceDetection, PeopleCounting, etc.)
+            s.touchWorker(key)
+            // Faz uma cópia só para publicação, sem o base64 (para não explodir o MQTT).
+            evtOut := evt
+            evtOut.SnapshotB64 = ""
+
+            topic := s.eventTopic(info, evtOut.AnalyticType)
+            payload, err := json.Marshal(evtOut)
+            if err != nil {
+                log.Printf("[worker %s] error marshaling event: %v", key, err)
+            } else {
+                if err := s.mqtt.Publish(topic, 1, false, payload); err != nil {
+                    log.Printf("[worker %s] error publishing to %s: %v", key, topic, err)
+                } else {
+                    log.Printf("[worker %s] published event to %s (event_id=%s)", key, topic, evt.EventID)
+                }
+            }
+
+            // 2) Se o faceengine estiver ativo, deixa ele decidir se é evento de face
+            if s.faceEngine != nil && s.faceEngine.Enabled() {
+                ctxFF, cancelFF := context.WithTimeout(context.Background(), 30*time.Second)
+                recognized, err := s.faceEngine.ProcessFaceCapture(ctxFF, evt)
+                cancelFF()
+                if err != nil {
+                    log.Printf("[worker %s] erro no faceengine: %v", key, err)
+                    continue
+                }
+                if recognized == nil {
+                    continue
+                }
+
+                // cópia para publicar sem base64
+                recOut := *recognized
+                recOut.SnapshotB64 = ""
+
+                recTopic := s.eventTopic(info, recOut.AnalyticType)
+                recPayload, err := json.Marshal(recOut)
+                if err != nil {
+                    log.Printf("[worker %s] erro ao marshalar faceRecognized: %v", key, err)
+                    continue
+                }
+                if err := s.mqtt.Publish(recTopic, 1, false, recPayload); err != nil {
+                    log.Printf("[worker %s] erro ao publicar faceRecognized em %s: %v", key, recTopic, err)
+                } else {
+                    log.Printf("[worker %s] published faceRecognized to %s (ff_person=%v conf=%v)",
+                        key, recTopic, recOut.Meta["ff_person_name"], recOut.Meta["ff_confidence"])
+                }
+            }
+        }
+    }()
+}
+
+func (s *Supervisor) eventTopic(info core.CameraInfo, analyticType string) string {
+    analyticType = strings.TrimSpace(analyticType)
+    if analyticType == "" {
+        analyticType = "unknown"
+    }
+    return fmt.Sprintf("%s/%s/%s/%s/%s/%s/%s/events",
+        s.baseTopic,
+        info.Tenant,
+        info.Building,
+        info.Floor,
+        info.DeviceType,
+        info.DeviceID,
+        analyticType,
+    )
+}
+
+func (s *Supervisor) cameraStatusTopic(info core.CameraInfo) string {
+    return fmt.Sprintf("%s/%s/%s/%s/%s/%s/status",
+        s.baseTopic,
+        info.Tenant,
+        info.Building,
+        info.Floor,
+        info.DeviceType,
+        info.DeviceID,
+    )
+}
+func (s *Supervisor) collectorStatusTopic(tenant, building string) string {
+    return fmt.Sprintf("%s/%s/%s/collector/status",
+        s.baseTopic,
+        tenant,
+        building,
+    )
+}
+
+func (s *Supervisor) stopCamera(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	w, ok := s.workers[key]
+	if !ok {
+		return
+	}
+
+	log.Printf("[supervisor] stopping camera worker %s", key)
+	w.cancel()
+	delete(s.workers, key)
+}
+
+func (s *Supervisor) stopAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for key, w := range s.workers {
+		log.Printf("[supervisor] stopping worker %s", key)
+		w.cancel()
+		delete(s.workers, key)
+	}
+}
