@@ -29,39 +29,55 @@ import (
 )
 
 type HikvisionDriver struct {
-	info   core.CameraInfo
-	client *http.Client
+	info          core.CameraInfo
+	client        *http.Client
+	statusHandler func(StatusUpdate)
 }
 
 func NewHikvisionDriver(info core.CameraInfo) (CameraDriver, error) {
-    var httpClient *http.Client
+	var httpClient *http.Client
 
-    if info.UseTLS {
-        // SEM controle por env: sempre ignora cert quando UseTLS=true
-        tr := &http.Transport{
-            TLSClientConfig: &tls.Config{
-                InsecureSkipVerify: true, //nolint:gosec - uso consciente em rede interna
-            },
-        }
-        httpClient = &http.Client{
-            Timeout:   0,
-            Transport: tr,
-        }
-        log.Printf("[hikvision] TLS inseguro (sempre) habilitado para %s (%s)",
-            info.Name, info.IP)
-    } else {
-        httpClient = &http.Client{
-            Timeout: 0,
-        }
-    }
+	if info.UseTLS {
+		// SEM controle por env: sempre ignora cert quando UseTLS=true
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec - uso consciente em rede interna
+			},
+		}
+		httpClient = &http.Client{
+			Timeout:   0,
+			Transport: tr,
+		}
+		log.Printf("[hikvision] TLS inseguro (sempre) habilitado para %s (%s)",
+			info.Name, info.IP)
+	} else {
+		httpClient = &http.Client{
+			Timeout: 0,
+		}
+	}
 
-    d := &HikvisionDriver{
-        info:   info,
-        client: httpClient,
-    }
-    return d, nil
+	d := &HikvisionDriver{
+		info:   info,
+		client: httpClient,
+	}
+	return d, nil
 }
 
+// SetStatusHandler registra callback para mudanças de estado da câmera.
+func (d *HikvisionDriver) SetStatusHandler(fn func(StatusUpdate)) {
+	d.statusHandler = fn
+}
+
+// ActiveAnalytics retorna a lista efetiva de analytics assinados para a câmera.
+func (d *HikvisionDriver) ActiveAnalytics() []string {
+	return d.selectedEventTypes()
+}
+
+func (d *HikvisionDriver) notifyStatus(update StatusUpdate) {
+	if d.statusHandler != nil {
+		d.statusHandler(update)
+	}
+}
 
 func init() {
 	// registra Hikvision para qualquer modelo: "hikvision:any"
@@ -98,13 +114,14 @@ func (d *HikvisionDriver) runOnce(ctx context.Context, events chan<- core.Analyt
 	if d.info.UseTLS {
 		scheme = "https"
 	}
-	
+
 	host := d.info.IP
 	if d.info.Port != 0 {
 		host = fmt.Sprintf("%s:%d", host, d.info.Port)
 	}
-	
+
 	baseURL := fmt.Sprintf("%s://%s", scheme, host)
+	d.notifyStatus(StatusUpdate{State: ConnectionStateConnecting, Reason: "abrindo subscribeEvent"})
 
 	// Opcional: consultar capabilities (pode ser útil, mas não é obrigatório)
 	// _, _ = d.doDigest(ctx, http.MethodGet, baseURL+"/ISAPI/Event/notification/subscribeEventCap", nil, "")
@@ -116,11 +133,13 @@ func (d *HikvisionDriver) runOnce(ctx context.Context, events chan<- core.Analyt
 	reqBody := bytes.NewReader(body)
 	resp, err := d.doDigest(ctx, http.MethodPost, subURL, reqBody, "application/xml")
 	if err != nil {
+		d.notifyStatus(StatusUpdate{State: ConnectionStateNotEstablished, Reason: err.Error()})
 		return fmt.Errorf("subscribeEvent error: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		d.notifyStatus(StatusUpdate{State: ConnectionStateNotEstablished, Reason: string(b)})
 		return fmt.Errorf("subscribeEvent status %d: %s", resp.StatusCode, string(b))
 	}
 
@@ -131,21 +150,25 @@ func (d *HikvisionDriver) runOnce(ctx context.Context, events chan<- core.Analyt
 	mediatype, params, err := mime.ParseMediaType(ct)
 	if err != nil {
 		resp.Body.Close()
+		d.notifyStatus(StatusUpdate{State: ConnectionStateNotEstablished, Reason: err.Error()})
 		return fmt.Errorf("invalid Content-Type %q: %w", ct, err)
 	}
 	if !strings.HasPrefix(mediatype, "multipart/") {
 		// Em algumas versões, pode vir "application/xml" contínuo; aqui assumimos multipart.
 		resp.Body.Close()
+		d.notifyStatus(StatusUpdate{State: ConnectionStateNotEstablished, Reason: "unexpected media type"})
 		return fmt.Errorf("unexpected media type: %s", mediatype)
 	}
 
 	boundary := params["boundary"]
 	if boundary == "" {
 		resp.Body.Close()
+		d.notifyStatus(StatusUpdate{State: ConnectionStateNotEstablished, Reason: "missing boundary"})
 		return fmt.Errorf("no boundary in Content-Type: %s", ct)
 	}
 
 	mr := multipart.NewReader(resp.Body, boundary)
+	d.notifyStatus(StatusUpdate{State: ConnectionStateOnline, Reason: "stream ativo"})
 
 	// pendingEvent: guardamos o evento textual até chegar a imagem.
 	var pendingEvent *core.AnalyticEvent
@@ -155,9 +178,11 @@ func (d *HikvisionDriver) runOnce(ctx context.Context, events chan<- core.Analyt
 		if err != nil {
 			if err == io.EOF {
 				resp.Body.Close()
+				d.notifyStatus(StatusUpdate{State: ConnectionStateOffline, Reason: "stream ended"})
 				return fmt.Errorf("stream ended")
 			}
 			resp.Body.Close()
+			d.notifyStatus(StatusUpdate{State: ConnectionStateOffline, Reason: err.Error()})
 			return fmt.Errorf("error reading part: %w", err)
 		}
 
@@ -246,7 +271,29 @@ func (d *HikvisionDriver) runOnce(ctx context.Context, events chan<- core.Analyt
 // baseado na lista de analytics vinda do /info (CameraInfo.Analytics).
 // Se não vier nada válido, cai no fallback: faceCapture.
 func (d *HikvisionDriver) buildSubscribeEventXML() []byte {
-	// 1) Monta lista de eventTypes a partir do /info
+	selected := d.selectedEventTypes()
+
+	// 3) Monta XML com eventMode=list e EventList com todos os tipos
+	var b strings.Builder
+	b.WriteString(`<SubscribeEvent xmlns="http://www.isapi.org/ver20/XMLSchema">`)
+	b.WriteString(`<format>json</format>`)
+	b.WriteString(`<heartbeat>30</heartbeat>`)
+	b.WriteString(`<eventMode>list</eventMode>`)
+	b.WriteString(`<EventList>`)
+
+	for _, t := range selected {
+		b.WriteString(`<Event><type>`)
+		b.WriteString(t)
+		b.WriteString(`</type><channels>1</channels></Event>`)
+	}
+
+	b.WriteString(`</EventList>`)
+	b.WriteString(`</SubscribeEvent>`)
+
+	return []byte(b.String())
+}
+
+func (d *HikvisionDriver) selectedEventTypes() []string {
 	var selected []string
 
 	if len(d.info.Analytics) > 0 {
@@ -267,7 +314,6 @@ func (d *HikvisionDriver) buildSubscribeEventXML() []byte {
 		}
 	}
 
-	// 2) Se nada configurado ou tudo inválido, fallback para faceCapture
 	if len(selected) == 0 {
 		selected = []string{"faceCapture"}
 		log.Printf(
@@ -276,24 +322,7 @@ func (d *HikvisionDriver) buildSubscribeEventXML() []byte {
 		)
 	}
 
-	// 3) Monta XML com eventMode=list e EventList com todos os tipos
-	var b strings.Builder
-	b.WriteString(`<SubscribeEvent xmlns="http://www.isapi.org/ver20/XMLSchema">`)
-	b.WriteString(`<format>json</format>`)
-	b.WriteString(`<heartbeat>30</heartbeat>`)
-	b.WriteString(`<eventMode>list</eventMode>`)
-	b.WriteString(`<EventList>`)
-
-	for _, t := range selected {
-		b.WriteString(`<Event><type>`)
-		b.WriteString(t)
-		b.WriteString(`</type><channels>1</channels></Event>`)
-	}
-
-	b.WriteString(`</EventList>`)
-	b.WriteString(`</SubscribeEvent>`)
-
-	return []byte(b.String())
+	return selected
 }
 
 // ----------------------------------

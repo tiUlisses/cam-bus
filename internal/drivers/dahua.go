@@ -21,8 +21,9 @@ import (
 )
 
 type DahuaDriver struct {
-	info   core.CameraInfo
-	client *http.Client
+	info          core.CameraInfo
+	client        *http.Client
+	statusHandler func(StatusUpdate)
 }
 
 func NewDahuaDriver(info core.CameraInfo) (CameraDriver, error) {
@@ -40,7 +41,7 @@ func NewDahuaDriver(info core.CameraInfo) (CameraDriver, error) {
 		}
 		log.Printf("[dahua] TLS inseguro habilitado para %s (%s)", info.Name, info.IP)
 	} else {
-		 httpClient = &http.Client{
+		httpClient = &http.Client{
 			Timeout: 0,
 		}
 	}
@@ -49,6 +50,22 @@ func NewDahuaDriver(info core.CameraInfo) (CameraDriver, error) {
 		info:   info,
 		client: httpClient,
 	}, nil
+}
+
+// SetStatusHandler registra callback para mudanças de status de conexão.
+func (d *DahuaDriver) SetStatusHandler(fn func(StatusUpdate)) {
+	d.statusHandler = fn
+}
+
+// ActiveAnalytics retorna a lista efetiva de analytics assinados para a câmera.
+func (d *DahuaDriver) ActiveAnalytics() []string {
+	return d.selectedEventCodes()
+}
+
+func (d *DahuaDriver) notifyStatus(update StatusUpdate) {
+	if d.statusHandler != nil {
+		d.statusHandler(update)
+	}
 }
 
 func init() {
@@ -141,6 +158,7 @@ func (d *DahuaDriver) runOnce(ctx context.Context, events chan<- core.AnalyticEv
 	// Define quais códigos de evento vamos assinar, com base no /info.
 	codes := d.selectedEventCodes()
 	codesStr := strings.Join(codes, ",")
+	d.notifyStatus(StatusUpdate{State: ConnectionStateConnecting, Reason: "abrindo stream"})
 
 	// Mapa para validar somente os códigos que vieram do MQTT (/info).
 	allowedCodes := make(map[string]struct{}, len(codes))
@@ -162,11 +180,13 @@ func (d *DahuaDriver) runOnce(ctx context.Context, events chan<- core.AnalyticEv
 
 	resp, err := d.doDigest(ctx, http.MethodGet, evtURL, nil, "")
 	if err != nil {
+		d.notifyStatus(StatusUpdate{State: ConnectionStateNotEstablished, Reason: err.Error()})
 		return fmt.Errorf("eventManager attach error: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		d.notifyStatus(StatusUpdate{State: ConnectionStateNotEstablished, Reason: string(b)})
 		return fmt.Errorf("eventManager status %d: %s", resp.StatusCode, string(b))
 	}
 
@@ -174,17 +194,25 @@ func (d *DahuaDriver) runOnce(ctx context.Context, events chan<- core.AnalyticEv
 	mediatype, params, err := mime.ParseMediaType(ct)
 	if err != nil {
 		resp.Body.Close()
+		d.notifyStatus(StatusUpdate{State: ConnectionStateNotEstablished, Reason: err.Error()})
 		return fmt.Errorf("invalid Content-Type %q: %w", ct, err)
 	}
 	if !strings.HasPrefix(mediatype, "multipart/") {
 		resp.Body.Close()
+		d.notifyStatus(StatusUpdate{State: ConnectionStateNotEstablished, Reason: "unexpected media type"})
 		return fmt.Errorf("unexpected media type: %s", mediatype)
 	}
 	boundary := params["boundary"]
 	if boundary == "" {
 		resp.Body.Close()
+		d.notifyStatus(StatusUpdate{State: ConnectionStateNotEstablished, Reason: "missing boundary"})
 		return fmt.Errorf("no boundary in Content-Type: %s", ct)
 	}
+
+	d.notifyStatus(StatusUpdate{
+		State:  ConnectionStateOnline,
+		Reason: fmt.Sprintf("subscribed to [%s]", codesStr),
+	})
 
 	mr := multipart.NewReader(resp.Body, boundary)
 
@@ -193,9 +221,11 @@ func (d *DahuaDriver) runOnce(ctx context.Context, events chan<- core.AnalyticEv
 		if err != nil {
 			if err == io.EOF {
 				resp.Body.Close()
+				d.notifyStatus(StatusUpdate{State: ConnectionStateOffline, Reason: "stream ended"})
 				return fmt.Errorf("stream ended")
 			}
 			resp.Body.Close()
+			d.notifyStatus(StatusUpdate{State: ConnectionStateOffline, Reason: err.Error()})
 			return fmt.Errorf("error reading part: %w", err)
 		}
 
