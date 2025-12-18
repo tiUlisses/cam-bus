@@ -1,0 +1,589 @@
+diff --git a/cmd/face-router/main.go b/cmd/face-router/main.go
+index fff637d..355843c 100644
+--- a/cmd/face-router/main.go
++++ b/cmd/face-router/main.go
+@@ -8,14 +8,15 @@ import (
+ 	"log"
+ 	"os"
+ 	"os/signal"
++	"strings"
+ 	"syscall"
+ 	"time"
+ 
+ 	"github.com/joho/godotenv"
+ 
+ 	"github.com/sua-org/cam-bus/internal/core"
++	"github.com/sua-org/cam-bus/internal/engines"
+ 	"github.com/sua-org/cam-bus/internal/mqttclient"
+-	"github.com/sua-org/cam-bus/internal/recognition"
+ )
+ 
+ func main() {
+@@ -33,12 +34,11 @@ func main() {
+     }
+     defer mqttCli.Close()
+ 
+-    engineName := getenv("FACE_ENGINE", "findface")
+-    eng, err := buildEngine(engineName)
+-    if err != nil {
+-        log.Fatalf("erro ao inicializar engine %s: %v", engineName, err)
++    mgr := engines.LoadFromEnv()
++    if mgr == nil || !mgr.Enabled() {
++        log.Fatalf("[face-router] nenhuma engine habilitada (use ENGINES=findface ou FACE_ENGINE=findface)")
+     }
+-    log.Printf("[face-router] usando engine: %s", eng.Name())
++    log.Printf("[face-router] engines habilitadas: %v", mgr.Names())
+ 
+     subTopic := fmt.Sprintf("$share/face-router/%s/+/+/+/+/+/faceCapture/events", baseTopic)
+     log.Printf("[face-router] subscrevendo em: %s", subTopic)
+@@ -50,7 +50,7 @@ func main() {
+     signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+ 
+     if err := mqttCli.Subscribe(subTopic, 1, func(topic string, payload []byte) {
+-        handleMessage(ctx, mqttCli, baseTopic, eng, topic, payload)
++        handleMessage(ctx, mqttCli, baseTopic, mgr, topic, payload)
+     }); err != nil {
+         log.Fatalf("erro ao assinar tópico %s: %v", subTopic, err)
+     }
+@@ -65,24 +65,11 @@ func main() {
+     time.Sleep(500 * time.Millisecond)
+ }
+ 
+-func buildEngine(name string) (recognition.Engine, error) {
+-    switch name {
+-    case "findface":
+-        return recognition.NewFindFaceFromEnv()
+-    // case "dahua_ivss":
+-    //     return recognition.NewDahuaIVSSEngineFromEnv()
+-    // case "deepneuronic":
+-    //     return recognition.NewDeepNeuronicFromEnv()
+-    default:
+-        return recognition.NewFindFaceFromEnv()
+-    }
+-}
+-
+ func handleMessage(
+     ctx context.Context,
+     mqttCli *mqttclient.Client,
+     baseTopic string,
+-    engine recognition.Engine,
++    mgr *engines.Manager,
+     topic string,
+     payload []byte,
+ ) {
+@@ -92,56 +79,41 @@ func handleMessage(
+         return
+     }
+ 
+-    if evt.AnalyticType != "faceCapture" {
++    at := strings.ToLower(strings.TrimSpace(evt.AnalyticType))
++    if at != "facecapture" && at != "facedetection" {
+         return
+     }
+ 
+     ctxReq, cancel := context.WithTimeout(ctx, 10*time.Second)
+     defer cancel()
+ 
+-    res, err := engine.HandleFaceCapture(ctxReq, evt)
+-    if err != nil {
+-        log.Printf("[face-router] erro no engine %s: %v", engine.Name(), err)
+-        return
+-    }
+-    if res == nil {
+-        return
+-    }
+-
+-    out := recognition.FaceRecognitionEvent{
+-        Timestamp:     time.Now().UTC(),
+-        SourceEventID: evt.EventID,
+-        CameraIP:      evt.CameraIP,
+-        CameraName:    evt.CameraName,
+-        Tenant:        evt.Tenant,
+-        Building:      evt.Building,
+-        Floor:         evt.Floor,
+-        DeviceType:    evt.DeviceType,
+-        DeviceID:      evt.DeviceID,
+-        SnapshotURL:   evt.SnapshotURL,
+-        Recognition:   res,
+-    }
+-
+-    b, err := json.Marshal(out)
+-    if err != nil {
+-        log.Printf("[face-router] erro ao montar JSON: %v", err)
+-        return
+-    }
+-
+-    topicOut := fmt.Sprintf("%s/%s/%s/%s/%s/%s/FaceRecognized/events",
+-        baseTopic,
+-        safe(evt.Tenant, "default"),
+-        safe(evt.Building, "building"),
+-        safe(evt.Floor, "floor"),
+-        safe(evt.DeviceType, "device"),
+-        safe(evt.DeviceID, "id"),
+-    )
+-
+-    if err := mqttCli.Publish(topicOut, 1, false, b); err != nil {
+-        log.Printf("[face-router] erro ao publicar em %s: %v", topicOut, err)
+-    } else {
+-        log.Printf("[face-router] published FaceRecognized -> %s (event=%s, matched=%v, person=%s)",
+-            topicOut, evt.EventID, res.Matched, res.PersonName)
++    derived, _ := mgr.ProcessAll(ctxReq, evt)
++    for _, d := range derived {
++        // Publica sem SnapshotB64 (evitar explosão no MQTT)
++        out := d
++        out.SnapshotB64 = ""
++
++        b, err := json.Marshal(out)
++        if err != nil {
++            log.Printf("[face-router] erro ao montar JSON (%s): %v", out.AnalyticType, err)
++            continue
++        }
++
++        topicOut := fmt.Sprintf("%s/%s/%s/%s/%s/%s/%s/events",
++            baseTopic,
++            safe(evt.Tenant, "default"),
++            safe(evt.Building, "building"),
++            safe(evt.Floor, "floor"),
++            safe(evt.DeviceType, "device"),
++            safe(evt.DeviceID, "id"),
++            safe(out.AnalyticType, "unknown"),
++        )
++
++        if err := mqttCli.Publish(topicOut, 1, false, b); err != nil {
++            log.Printf("[face-router] erro ao publicar em %s: %v", topicOut, err)
++        } else {
++            log.Printf("[face-router] published %s -> %s (source_event=%s)", out.AnalyticType, topicOut, evt.EventID)
++        }
+     }
+ }
+ 
+diff --git a/go.mod b/go.mod
+index 4e21790..669e325 100644
+--- a/go.mod
++++ b/go.mod
+@@ -2,8 +2,6 @@ module github.com/sua-org/cam-bus
+ 
+ go 1.23.0
+ 
+-toolchain go1.24.2
+-
+ require (
+ 	github.com/eclipse/paho.mqtt.golang v1.5.0
+ 	github.com/joho/godotenv v1.5.1
+diff --git a/internal/engines/engine.go b/internal/engines/engine.go
+new file mode 100644
+index 0000000..a8eef03
+--- /dev/null
++++ b/internal/engines/engine.go
+@@ -0,0 +1,25 @@
++package engines
++
++import (
++    "context"
++
++    "github.com/sua-org/cam-bus/internal/core"
++)
++
++// Engine é um pós-processador de eventos.
++// Ele recebe um evento (ex.: faceCapture, ANPR, etc.) e pode:
++// - retornar zero eventos (ignorar)
++// - retornar um ou mais eventos derivados (ex.: faceRecognized)
++//
++// Importante: engines NÃO publicam no MQTT diretamente.
++// Quem publica é o supervisor, para manter consistência de tópicos.
++type Engine interface {
++    Name() string
++    Enabled() bool
++
++    // Process pode retornar:
++    // - nil, nil  => engine não aplicável / sem saída
++    // - []events  => eventos derivados
++    // - error     => erro (o supervisor decide se loga e segue)
++    Process(ctx context.Context, evt core.AnalyticEvent) ([]core.AnalyticEvent, error)
++}
+diff --git a/internal/engines/findface_engine.go b/internal/engines/findface_engine.go
+new file mode 100644
+index 0000000..27250d7
+--- /dev/null
++++ b/internal/engines/findface_engine.go
+@@ -0,0 +1,38 @@
++package engines
++
++import (
++    "context"
++
++    "github.com/sua-org/cam-bus/internal/core"
++    "github.com/sua-org/cam-bus/internal/faceengine"
++)
++
++// FindFaceEngine adapta o pacote internal/faceengine para o padrão Engine.
++// Isso facilita futuramente trocar/alternar engines (ex.: DeepNeuronic, IVSS, etc.)
++// sem tocar no supervisor.
++type FindFaceEngine struct {
++    fe *faceengine.Engine
++}
++
++func NewFindFaceFromEnv() Engine {
++    fe := faceengine.NewFromEnv()
++    if fe == nil || !fe.Enabled() {
++        return nil
++    }
++    return &FindFaceEngine{fe: fe}
++}
++
++func (e *FindFaceEngine) Name() string { return "findface" }
++
++func (e *FindFaceEngine) Enabled() bool { return e != nil && e.fe != nil && e.fe.Enabled() }
++
++func (e *FindFaceEngine) Process(ctx context.Context, evt core.AnalyticEvent) ([]core.AnalyticEvent, error) {
++    if !e.Enabled() {
++        return nil, nil
++    }
++    out, err := e.fe.ProcessFaceCapture(ctx, evt)
++    if err != nil || out == nil {
++        return nil, err
++    }
++    return []core.AnalyticEvent{*out}, nil
++}
+diff --git a/internal/engines/load.go b/internal/engines/load.go
+new file mode 100644
+index 0000000..adab1fc
+--- /dev/null
++++ b/internal/engines/load.go
+@@ -0,0 +1,79 @@
++package engines
++
++import (
++    "log"
++    "os"
++    "strconv"
++    "strings"
++    "time"
++)
++
++// LoadFromEnv carrega as engines habilitadas.
++//
++// Preferencial: ENGINES="findface,plater" (comma-separated)
++// Compatibilidade: se ENGINES não vier, usa FACE_ENGINE (quando for "findface").
++func LoadFromEnv() *Manager {
++    names := parseCSV(os.Getenv("ENGINES"))
++    if len(names) == 0 {
++        // compat: comportamento antigo
++        fe := strings.ToLower(strings.TrimSpace(os.Getenv("FACE_ENGINE")))
++        if fe != "" && fe != "none" {
++            names = []string{fe}
++        }
++    }
++
++    timeout := envDurationSeconds("ENGINE_TIMEOUT_SECONDS", 10*time.Second)
++
++    var list []Engine
++    for _, n := range names {
++        switch strings.ToLower(n) {
++        case "findface":
++            if e := NewFindFaceFromEnv(); e != nil && e.Enabled() {
++                list = append(list, e)
++            }
++        case "plater", "plate", "lpr":
++            // Placeholder: mantém a arquitetura modular pronta.
++            // Implementaremos de verdade quando definirmos o provider (ex.: Plate Recognizer / OpenALPR / engine nativa).
++            list = append(list, NewPlateStub())
++        default:
++            log.Printf("[engines] engine %q desconhecida (ignorando)", n)
++        }
++    }
++
++    m := NewManager(list, timeout)
++    if m.Enabled() {
++        log.Printf("[engines] habilitadas: %s", strings.Join(m.Names(), ","))
++    } else {
++        log.Printf("[engines] nenhuma engine habilitada")
++    }
++    return m
++}
++
++func parseCSV(v string) []string {
++    v = strings.TrimSpace(v)
++    if v == "" {
++        return nil
++    }
++    parts := strings.Split(v, ",")
++    out := make([]string, 0, len(parts))
++    for _, p := range parts {
++        s := strings.TrimSpace(p)
++        if s == "" {
++            continue
++        }
++        out = append(out, s)
++    }
++    return out
++}
++
++func envDurationSeconds(key string, def time.Duration) time.Duration {
++    v := strings.TrimSpace(os.Getenv(key))
++    if v == "" {
++        return def
++    }
++    sec, err := strconv.Atoi(v)
++    if err != nil || sec <= 0 {
++        return def
++    }
++    return time.Duration(sec) * time.Second
++}
+diff --git a/internal/engines/manager.go b/internal/engines/manager.go
+new file mode 100644
+index 0000000..887651e
+--- /dev/null
++++ b/internal/engines/manager.go
+@@ -0,0 +1,100 @@
++package engines
++
++import (
++    "context"
++    "fmt"
++    "log"
++    "runtime/debug"
++    "strings"
++    "time"
++
++    "github.com/sua-org/cam-bus/internal/core"
++)
++
++type Manager struct {
++    engines []Engine
++
++    // timeout padrão para cada engine
++    perEngineTimeout time.Duration
++}
++
++func NewManager(engines []Engine, perEngineTimeout time.Duration) *Manager {
++    if perEngineTimeout <= 0 {
++        perEngineTimeout = 10 * time.Second
++    }
++    // remove nils e engines desabilitados
++    filtered := make([]Engine, 0, len(engines))
++    for _, e := range engines {
++        if e == nil || !e.Enabled() {
++            continue
++        }
++        filtered = append(filtered, e)
++    }
++    return &Manager{engines: filtered, perEngineTimeout: perEngineTimeout}
++}
++
++func (m *Manager) Enabled() bool {
++    return m != nil && len(m.engines) > 0
++}
++
++func (m *Manager) Names() []string {
++    if m == nil {
++        return nil
++    }
++    out := make([]string, 0, len(m.engines))
++    for _, e := range m.engines {
++        out = append(out, e.Name())
++    }
++    return out
++}
++
++func (m *Manager) Has(name string) bool {
++    if m == nil {
++        return false
++    }
++    name = strings.ToLower(strings.TrimSpace(name))
++    for _, e := range m.engines {
++        if strings.ToLower(e.Name()) == name {
++            return true
++        }
++    }
++    return false
++}
++
++// ProcessAll roda todas as engines em sequência e retorna todos os eventos derivados.
++// Nunca dá panic (proteção de recover por engine).
++func (m *Manager) ProcessAll(ctx context.Context, evt core.AnalyticEvent) ([]core.AnalyticEvent, error) {
++    if m == nil || len(m.engines) == 0 {
++        return nil, nil
++    }
++
++    var out []core.AnalyticEvent
++    for _, e := range m.engines {
++        if e == nil || !e.Enabled() {
++            continue
++        }
++
++        // Timeout por engine para não travar o pipeline
++        ctxEng, cancel := context.WithTimeout(ctx, m.perEngineTimeout)
++        derived, err := func() (res []core.AnalyticEvent, err error) {
++            defer func() {
++                if r := recover(); r != nil {
++                    log.Printf("[engines] panic na engine %s: %v\n%s", e.Name(), r, string(debug.Stack()))
++                    err = fmt.Errorf("panic in engine %s", e.Name())
++                }
++            }()
++            return e.Process(ctxEng, evt)
++        }()
++        cancel()
++
++        if err != nil {
++            // por enquanto: loga e segue (não falha o worker)
++            log.Printf("[engines] engine %s erro: %v", e.Name(), err)
++            continue
++        }
++        if len(derived) > 0 {
++            out = append(out, derived...)
++        }
++    }
++    return out, nil
++}
+diff --git a/internal/engines/plate_stub.go b/internal/engines/plate_stub.go
+new file mode 100644
+index 0000000..b795964
+--- /dev/null
++++ b/internal/engines/plate_stub.go
+@@ -0,0 +1,25 @@
++package engines
++
++import (
++    "context"
++
++    "github.com/sua-org/cam-bus/internal/core"
++)
++
++// PlateStub é um placeholder para a engine de placas.
++//
++// Ele existe para já deixar o projeto modular e permitir alternância via ENGINES,
++// sem bloquear o desenvolvimento. No patch que for integrar de verdade, a gente
++// troca essa implementação por uma engine real.
++type PlateStub struct{}
++
++func NewPlateStub() Engine { return &PlateStub{} }
++
++func (p *PlateStub) Name() string { return "plater" }
++
++func (p *PlateStub) Enabled() bool { return true }
++
++func (p *PlateStub) Process(ctx context.Context, evt core.AnalyticEvent) ([]core.AnalyticEvent, error) {
++    // ainda não faz nada.
++    return nil, nil
++}
+diff --git a/internal/supervisor/supervisor.go b/internal/supervisor/supervisor.go
+index 65736b9..970640c 100644
+--- a/internal/supervisor/supervisor.go
++++ b/internal/supervisor/supervisor.go
+@@ -15,7 +15,7 @@ import (
+ 	"github.com/shirou/gopsutil/v3/process"
+ 	"github.com/sua-org/cam-bus/internal/core"
+ 	"github.com/sua-org/cam-bus/internal/drivers"
+-	"github.com/sua-org/cam-bus/internal/faceengine"
++	"github.com/sua-org/cam-bus/internal/engines"
+ 	"github.com/sua-org/cam-bus/internal/mqttclient"
+ )
+ 
+@@ -24,7 +24,7 @@ type Supervisor struct {
+ 	baseTopic string
+ 
+ 	shard      string
+-	faceEngine *faceengine.Engine
++	engines    *engines.Manager
+ 
+ 	mu      sync.Mutex
+ 	workers map[string]*cameraWorker
+@@ -77,20 +77,18 @@ func New(mqtt *mqttclient.Client, baseTopic string) *Supervisor {
+ 		log.Printf("[supervisor] CAMBUS_SHARD=%s", shard)
+ 	}
+ 
+-	fe := faceengine.NewFromEnv()
+-	if fe == nil || !fe.Enabled() {
+-		log.Printf("[supervisor] faceengine desabilitado (FACE_ENGINE vazio ou erro de config)")
+-	} else {
+-		log.Printf("[supervisor] faceengine habilitado (FACE_ENGINE=findface)")
+-	}
++	eng := engines.LoadFromEnv()
+     statusInterval := envDurationSeconds("CAMBUS_STATUS_INTERVAL_SECONDS", 30*time.Second)
+     var procHandle *process.Process
++    if p, err := process.NewProcess(int32(os.Getpid())); err == nil {
++        procHandle = p
++    }
+     
+ 	return &Supervisor{
+ 		mqtt:       mqtt,
+ 		baseTopic:  baseTopic,
+ 		shard:      shard,
+-		faceEngine: fe,
++		engines:    eng,
+ 		workers:    make(map[string]*cameraWorker),
+         statusInterval: statusInterval,
+         proc:           procHandle,
+@@ -138,7 +136,7 @@ func slugForCamera(info core.CameraInfo) string {
+ // publishHADiscovery publica entidades MQTT Discovery para o Home Assistant
+ // para uma câmera que tenha analítico faceRecognized.
+ func (s *Supervisor) publishHADiscovery(info core.CameraInfo) error {
+-    if s.faceEngine == nil || !s.faceEngine.Enabled() {
++    if s.engines == nil || !s.engines.Has("findface") {
+         return nil
+     }
+ 
+@@ -604,8 +602,7 @@ func (s *Supervisor) startOrUpdateCamera(info core.CameraInfo) {
+ 		}
+ 	}()
+ 
+-	// Goroutine que publica eventos no MQTT e aciona o faceengine (para faceCapture)
+-    // Goroutine que publica eventos no MQTT e aciona o faceengine
++	// Goroutine que publica eventos no MQTT e aciona engines (pós-processadores)
+     go func() {
+         for evt := range eventsCh {
+             // 1) publica evento original (faceCapture, FaceDetection, PeopleCounting, etc.)
+@@ -626,34 +623,24 @@ func (s *Supervisor) startOrUpdateCamera(info core.CameraInfo) {
+                 }
+             }
+ 
+-            // 2) Se o faceengine estiver ativo, deixa ele decidir se é evento de face
+-            if s.faceEngine != nil && s.faceEngine.Enabled() {
+-                ctxFF, cancelFF := context.WithTimeout(context.Background(), 30*time.Second)
+-                recognized, err := s.faceEngine.ProcessFaceCapture(ctxFF, evt)
+-                cancelFF()
+-                if err != nil {
+-                    log.Printf("[worker %s] erro no faceengine: %v", key, err)
+-                    continue
+-                }
+-                if recognized == nil {
+-                    continue
+-                }
+-
+-                // cópia para publicar sem base64
+-                recOut := *recognized
+-                recOut.SnapshotB64 = ""
+-
+-                recTopic := s.eventTopic(info, recOut.AnalyticType)
+-                recPayload, err := json.Marshal(recOut)
+-                if err != nil {
+-                    log.Printf("[worker %s] erro ao marshalar faceRecognized: %v", key, err)
+-                    continue
+-                }
+-                if err := s.mqtt.Publish(recTopic, 1, false, recPayload); err != nil {
+-                    log.Printf("[worker %s] erro ao publicar faceRecognized em %s: %v", key, recTopic, err)
+-                } else {
+-                    log.Printf("[worker %s] published faceRecognized to %s (ff_person=%v conf=%v)",
+-                        key, recTopic, recOut.Meta["ff_person_name"], recOut.Meta["ff_confidence"])
++            // 2) Engines: geram eventos derivados (ex.: faceRecognized)
++            if s.engines != nil && s.engines.Enabled() {
++                derived, _ := s.engines.ProcessAll(ctx, evt)
++                for _, dEvt := range derived {
++                    outEvt := dEvt
++                    outEvt.SnapshotB64 = ""
++
++                    outTopic := s.eventTopic(info, outEvt.AnalyticType)
++                    outPayload, err := json.Marshal(outEvt)
++                    if err != nil {
++                        log.Printf("[worker %s] erro ao marshalar evento derivado (%s): %v", key, outEvt.AnalyticType, err)
++                        continue
++                    }
++                    if err := s.mqtt.Publish(outTopic, 1, false, outPayload); err != nil {
++                        log.Printf("[worker %s] erro ao publicar evento derivado (%s) em %s: %v", key, outEvt.AnalyticType, outTopic, err)
++                        continue
++                    }
++                    log.Printf("[worker %s] published derived event (%s) -> %s (event_id=%s)", key, outEvt.AnalyticType, outTopic, outEvt.EventID)
+                 }
+             }
+         }

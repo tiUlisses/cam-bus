@@ -15,7 +15,7 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 	"github.com/sua-org/cam-bus/internal/core"
 	"github.com/sua-org/cam-bus/internal/drivers"
-	"github.com/sua-org/cam-bus/internal/faceengine"
+	"github.com/sua-org/cam-bus/internal/engines"
 	"github.com/sua-org/cam-bus/internal/mqttclient"
 )
 
@@ -24,7 +24,7 @@ type Supervisor struct {
 	baseTopic string
 
 	shard      string
-	faceEngine *faceengine.Engine
+	engines    *engines.Manager
 
 	mu      sync.Mutex
 	workers map[string]*cameraWorker
@@ -77,20 +77,18 @@ func New(mqtt *mqttclient.Client, baseTopic string) *Supervisor {
 		log.Printf("[supervisor] CAMBUS_SHARD=%s", shard)
 	}
 
-	fe := faceengine.NewFromEnv()
-	if fe == nil || !fe.Enabled() {
-		log.Printf("[supervisor] faceengine desabilitado (FACE_ENGINE vazio ou erro de config)")
-	} else {
-		log.Printf("[supervisor] faceengine habilitado (FACE_ENGINE=findface)")
-	}
+	eng := engines.LoadFromEnv()
     statusInterval := envDurationSeconds("CAMBUS_STATUS_INTERVAL_SECONDS", 30*time.Second)
     var procHandle *process.Process
+    if p, err := process.NewProcess(int32(os.Getpid())); err == nil {
+        procHandle = p
+    }
     
 	return &Supervisor{
 		mqtt:       mqtt,
 		baseTopic:  baseTopic,
 		shard:      shard,
-		faceEngine: fe,
+		engines:    eng,
 		workers:    make(map[string]*cameraWorker),
         statusInterval: statusInterval,
         proc:           procHandle,
@@ -138,7 +136,7 @@ func slugForCamera(info core.CameraInfo) string {
 // publishHADiscovery publica entidades MQTT Discovery para o Home Assistant
 // para uma câmera que tenha analítico faceRecognized.
 func (s *Supervisor) publishHADiscovery(info core.CameraInfo) error {
-    if s.faceEngine == nil || !s.faceEngine.Enabled() {
+    if s.engines == nil || !s.engines.Has("findface") {
         return nil
     }
 
@@ -604,8 +602,7 @@ func (s *Supervisor) startOrUpdateCamera(info core.CameraInfo) {
 		}
 	}()
 
-	// Goroutine que publica eventos no MQTT e aciona o faceengine (para faceCapture)
-    // Goroutine que publica eventos no MQTT e aciona o faceengine
+	// Goroutine que publica eventos no MQTT e aciona engines (pós-processadores)
     go func() {
         for evt := range eventsCh {
             // 1) publica evento original (faceCapture, FaceDetection, PeopleCounting, etc.)
@@ -626,34 +623,24 @@ func (s *Supervisor) startOrUpdateCamera(info core.CameraInfo) {
                 }
             }
 
-            // 2) Se o faceengine estiver ativo, deixa ele decidir se é evento de face
-            if s.faceEngine != nil && s.faceEngine.Enabled() {
-                ctxFF, cancelFF := context.WithTimeout(context.Background(), 30*time.Second)
-                recognized, err := s.faceEngine.ProcessFaceCapture(ctxFF, evt)
-                cancelFF()
-                if err != nil {
-                    log.Printf("[worker %s] erro no faceengine: %v", key, err)
-                    continue
-                }
-                if recognized == nil {
-                    continue
-                }
+            // 2) Engines: geram eventos derivados (ex.: faceRecognized)
+            if s.engines != nil && s.engines.Enabled() {
+                derived, _ := s.engines.ProcessAll(ctx, evt)
+                for _, dEvt := range derived {
+                    outEvt := dEvt
+                    outEvt.SnapshotB64 = ""
 
-                // cópia para publicar sem base64
-                recOut := *recognized
-                recOut.SnapshotB64 = ""
-
-                recTopic := s.eventTopic(info, recOut.AnalyticType)
-                recPayload, err := json.Marshal(recOut)
-                if err != nil {
-                    log.Printf("[worker %s] erro ao marshalar faceRecognized: %v", key, err)
-                    continue
-                }
-                if err := s.mqtt.Publish(recTopic, 1, false, recPayload); err != nil {
-                    log.Printf("[worker %s] erro ao publicar faceRecognized em %s: %v", key, recTopic, err)
-                } else {
-                    log.Printf("[worker %s] published faceRecognized to %s (ff_person=%v conf=%v)",
-                        key, recTopic, recOut.Meta["ff_person_name"], recOut.Meta["ff_confidence"])
+                    outTopic := s.eventTopic(info, outEvt.AnalyticType)
+                    outPayload, err := json.Marshal(outEvt)
+                    if err != nil {
+                        log.Printf("[worker %s] erro ao marshalar evento derivado (%s): %v", key, outEvt.AnalyticType, err)
+                        continue
+                    }
+                    if err := s.mqtt.Publish(outTopic, 1, false, outPayload); err != nil {
+                        log.Printf("[worker %s] erro ao publicar evento derivado (%s) em %s: %v", key, outEvt.AnalyticType, outTopic, err)
+                        continue
+                    }
+                    log.Printf("[worker %s] published derived event (%s) -> %s (event_id=%s)", key, outEvt.AnalyticType, outTopic, outEvt.EventID)
                 }
             }
         }

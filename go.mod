@@ -2,8 +2,6 @@ module github.com/sua-org/cam-bus
 
 go 1.23.0
 
-toolchain go1.24.2
-
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.0
 	github.com/joho/godotenv v1.5.1

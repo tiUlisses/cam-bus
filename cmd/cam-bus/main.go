@@ -24,7 +24,7 @@ func main() {
         log.Printf("[main] .env carregado com sucesso")
     }
 
-    baseTopic := getenv("MQTT_BASE_TOPIC", "rtls/cameras")
+    baseTopic := getenv("MQTT_BASE_TOPIC", "security-vision/cameras")
 
     // Inicializa MinIO (opcional; se falhar, continua sem storage remoto)
     store, err := storage.NewMinioStoreFromEnv()

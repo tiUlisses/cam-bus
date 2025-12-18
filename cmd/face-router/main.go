@@ -8,14 +8,15 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
 
 	"github.com/sua-org/cam-bus/internal/core"
+	"github.com/sua-org/cam-bus/internal/engines"
 	"github.com/sua-org/cam-bus/internal/mqttclient"
-	"github.com/sua-org/cam-bus/internal/recognition"
 )
 
 func main() {
@@ -25,7 +26,7 @@ func main() {
         log.Printf("[face-router] .env carregado com sucesso")
     }
 
-    baseTopic := getenv("MQTT_BASE_TOPIC", "rtls/cameras")
+    baseTopic := getenv("MQTT_BASE_TOPIC", "security-vision/cameras")
 
     mqttCli, err := mqttclient.NewClientFromEnv("face-router")
     if err != nil {
@@ -33,12 +34,11 @@ func main() {
     }
     defer mqttCli.Close()
 
-    engineName := getenv("FACE_ENGINE", "findface")
-    eng, err := buildEngine(engineName)
-    if err != nil {
-        log.Fatalf("erro ao inicializar engine %s: %v", engineName, err)
+    mgr := engines.LoadFromEnv()
+    if mgr == nil || !mgr.Enabled() {
+        log.Fatalf("[face-router] nenhuma engine habilitada (use ENGINES=findface ou FACE_ENGINE=findface)")
     }
-    log.Printf("[face-router] usando engine: %s", eng.Name())
+    log.Printf("[face-router] engines habilitadas: %v", mgr.Names())
 
     subTopic := fmt.Sprintf("$share/face-router/%s/+/+/+/+/+/faceCapture/events", baseTopic)
     log.Printf("[face-router] subscrevendo em: %s", subTopic)
@@ -50,7 +50,7 @@ func main() {
     signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
     if err := mqttCli.Subscribe(subTopic, 1, func(topic string, payload []byte) {
-        handleMessage(ctx, mqttCli, baseTopic, eng, topic, payload)
+        handleMessage(ctx, mqttCli, baseTopic, mgr, topic, payload)
     }); err != nil {
         log.Fatalf("erro ao assinar tópico %s: %v", subTopic, err)
     }
@@ -65,24 +65,11 @@ func main() {
     time.Sleep(500 * time.Millisecond)
 }
 
-func buildEngine(name string) (recognition.Engine, error) {
-    switch name {
-    case "findface":
-        return recognition.NewFindFaceFromEnv()
-    // case "dahua_ivss":
-    //     return recognition.NewDahuaIVSSEngineFromEnv()
-    // case "deepneuronic":
-    //     return recognition.NewDeepNeuronicFromEnv()
-    default:
-        return recognition.NewFindFaceFromEnv()
-    }
-}
-
 func handleMessage(
     ctx context.Context,
     mqttCli *mqttclient.Client,
     baseTopic string,
-    engine recognition.Engine,
+    mgr *engines.Manager,
     topic string,
     payload []byte,
 ) {
@@ -92,56 +79,41 @@ func handleMessage(
         return
     }
 
-    if evt.AnalyticType != "faceCapture" {
+    at := strings.ToLower(strings.TrimSpace(evt.AnalyticType))
+    if at != "facecapture" && at != "facedetection" {
         return
     }
 
     ctxReq, cancel := context.WithTimeout(ctx, 10*time.Second)
     defer cancel()
 
-    res, err := engine.HandleFaceCapture(ctxReq, evt)
-    if err != nil {
-        log.Printf("[face-router] erro no engine %s: %v", engine.Name(), err)
-        return
-    }
-    if res == nil {
-        return
-    }
+    derived, _ := mgr.ProcessAll(ctxReq, evt)
+    for _, d := range derived {
+        // Publica sem SnapshotB64 (evitar explosão no MQTT)
+        out := d
+        out.SnapshotB64 = ""
 
-    out := recognition.FaceRecognitionEvent{
-        Timestamp:     time.Now().UTC(),
-        SourceEventID: evt.EventID,
-        CameraIP:      evt.CameraIP,
-        CameraName:    evt.CameraName,
-        Tenant:        evt.Tenant,
-        Building:      evt.Building,
-        Floor:         evt.Floor,
-        DeviceType:    evt.DeviceType,
-        DeviceID:      evt.DeviceID,
-        SnapshotURL:   evt.SnapshotURL,
-        Recognition:   res,
-    }
+        b, err := json.Marshal(out)
+        if err != nil {
+            log.Printf("[face-router] erro ao montar JSON (%s): %v", out.AnalyticType, err)
+            continue
+        }
 
-    b, err := json.Marshal(out)
-    if err != nil {
-        log.Printf("[face-router] erro ao montar JSON: %v", err)
-        return
-    }
+        topicOut := fmt.Sprintf("%s/%s/%s/%s/%s/%s/%s/events",
+            baseTopic,
+            safe(evt.Tenant, "default"),
+            safe(evt.Building, "building"),
+            safe(evt.Floor, "floor"),
+            safe(evt.DeviceType, "device"),
+            safe(evt.DeviceID, "id"),
+            safe(out.AnalyticType, "unknown"),
+        )
 
-    topicOut := fmt.Sprintf("%s/%s/%s/%s/%s/%s/FaceRecognized/events",
-        baseTopic,
-        safe(evt.Tenant, "default"),
-        safe(evt.Building, "building"),
-        safe(evt.Floor, "floor"),
-        safe(evt.DeviceType, "device"),
-        safe(evt.DeviceID, "id"),
-    )
-
-    if err := mqttCli.Publish(topicOut, 1, false, b); err != nil {
-        log.Printf("[face-router] erro ao publicar em %s: %v", topicOut, err)
-    } else {
-        log.Printf("[face-router] published FaceRecognized -> %s (event=%s, matched=%v, person=%s)",
-            topicOut, evt.EventID, res.Matched, res.PersonName)
+        if err := mqttCli.Publish(topicOut, 1, false, b); err != nil {
+            log.Printf("[face-router] erro ao publicar em %s: %v", topicOut, err)
+        } else {
+            log.Printf("[face-router] published %s -> %s (source_event=%s)", out.AnalyticType, topicOut, evt.EventID)
+        }
     }
 }
 
