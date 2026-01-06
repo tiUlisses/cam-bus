@@ -3,10 +3,12 @@ package mediamtx
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,38 +37,47 @@ type Config struct {
 }
 
 type PathDefaults struct {
-	Record                bool   `yaml:"record"`
-	RecordPath            string `yaml:"recordPath"`
-	RecordFormat          string `yaml:"recordFormat"`
-	RecordPartDuration    string `yaml:"recordPartDuration"`
-	RecordSegmentDuration string `yaml:"recordSegmentDuration"`
-	RecordDeleteAfter     string `yaml:"recordDeleteAfter"`
+	Record                bool   `yaml:"record" json:"record"`
+	RecordPath            string `yaml:"recordPath" json:"recordPath"`
+	RecordFormat          string `yaml:"recordFormat" json:"recordFormat"`
+	RecordPartDuration    string `yaml:"recordPartDuration" json:"recordPartDuration"`
+	RecordSegmentDuration string `yaml:"recordSegmentDuration" json:"recordSegmentDuration"`
+	RecordDeleteAfter     string `yaml:"recordDeleteAfter" json:"recordDeleteAfter"`
 }
 
 type PathConfig struct {
-	Source            string `yaml:"source,omitempty"`
-	SourceOnDemand    bool   `yaml:"sourceOnDemand"`
-	Record            *bool  `yaml:"record,omitempty"`
-	RecordDeleteAfter string `yaml:"recordDeleteAfter,omitempty"`
+	Source            string `yaml:"source,omitempty" json:"source,omitempty"`
+	SourceOnDemand    bool   `yaml:"sourceOnDemand" json:"sourceOnDemand"`
+	Record            *bool  `yaml:"record,omitempty" json:"record,omitempty"`
+	RecordDeleteAfter string `yaml:"recordDeleteAfter,omitempty" json:"recordDeleteAfter,omitempty"`
 }
 
 type AuthInternalUser struct {
-	User        string           `yaml:"user"`
-	Pass        string           `yaml:"pass,omitempty"`
-	IPs         []string         `yaml:"ips,omitempty"`
-	Permissions []AuthPermission `yaml:"permissions,omitempty"`
+	User        string           `yaml:"user" json:"user"`
+	Pass        string           `yaml:"pass,omitempty" json:"pass,omitempty"`
+	IPs         []string         `yaml:"ips,omitempty" json:"ips,omitempty"`
+	Permissions []AuthPermission `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 }
 
 type AuthPermission struct {
-	Action string `yaml:"action"`
-	Path   string `yaml:"path,omitempty"`
+	Action string `yaml:"action" json:"action"`
+	Path   string `yaml:"path,omitempty" json:"path,omitempty"`
+}
+
+type GlobalPatch struct {
+	RTSPAddress       string             `json:"rtspAddress"`
+	HLS               bool               `json:"hls"`
+	WebRTC            bool               `json:"webrtc"`
+	API               bool               `json:"api"`
+	APIAddress        string             `json:"apiAddress"`
+	AuthInternalUsers []AuthInternalUser `json:"authInternalUsers"`
 }
 
 // Generator gera e aplica configs do MediaMTX a partir de câmeras ativas.
 type Generator struct {
 	path              string
 	reloadPID         int
-	reloadURL         string
+	apiBaseURL        string
 	reloadAuthUser    string
 	reloadAuthPass    string
 	reloadAuthToken   string
@@ -80,7 +91,7 @@ type Generator struct {
 // NewGeneratorFromEnv cria o gerador baseado em variáveis de ambiente.
 // MTX_PROXY_CONFIG_PATH (obrigatório) define o destino do YAML.
 // MTX_PROXY_RELOAD_PID ou MTX_PROXY_PID definem o PID para SIGHUP.
-// MTX_PROXY_RELOAD_URL define um endpoint HTTP para reload.
+// MTX_PROXY_RELOAD_URL define a base HTTP da API do MediaMTX (ex.: http://mtx-proxy:9997).
 // MTX_PROXY_RELOAD_USER/MTX_PROXY_RELOAD_PASS ou MTX_PROXY_RELOAD_TOKEN definem credenciais para reload HTTP.
 // MTX_PROXY_API_USER/MTX_PROXY_API_PASS configuram authInternalUsers no YAML gerado.
 // MTX_PROXY_API_TOKEN (legado) pode ser usado como fallback para o reload token.
@@ -91,7 +102,7 @@ func NewGeneratorFromEnv() *Generator {
 		return nil
 	}
 
-	reloadURL := strings.TrimSpace(os.Getenv("MTX_PROXY_RELOAD_URL"))
+	apiBaseURL := normalizeAPIBaseURL(os.Getenv("MTX_PROXY_RELOAD_URL"))
 	reloadPID := parsePIDEnv("MTX_PROXY_RELOAD_PID")
 	if reloadPID == 0 {
 		reloadPID = parsePIDEnv("MTX_PROXY_PID")
@@ -118,7 +129,7 @@ func NewGeneratorFromEnv() *Generator {
 	return &Generator{
 		path:              path,
 		reloadPID:         reloadPID,
-		reloadURL:         reloadURL,
+		apiBaseURL:        apiBaseURL,
 		reloadAuthUser:    reloadUser,
 		reloadAuthPass:    reloadPass,
 		reloadAuthToken:   reloadToken,
@@ -158,7 +169,7 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 		return err
 	}
 
-	if err := g.reload(); err != nil {
+	if err := g.applyChanges(existing, cfg); err != nil {
 		return err
 	}
 
@@ -302,9 +313,9 @@ func (g *Generator) writeFile(data []byte) error {
 	return nil
 }
 
-func (g *Generator) reload() error {
-	if g.reloadURL != "" {
-		return g.reloadViaHTTP()
+func (g *Generator) applyChanges(existing, desired Config) error {
+	if g.apiBaseURL != "" {
+		return g.applyConfigViaAPI(existing, desired)
 	}
 	if g.reloadPID > 0 {
 		return g.reloadViaSignal()
@@ -323,29 +334,50 @@ func (g *Generator) reloadViaSignal() error {
 	return nil
 }
 
-func (g *Generator) reloadViaHTTP() error {
+func (g *Generator) applyConfigViaAPI(existing, desired Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.reloadURL, nil)
-	if err != nil {
-		return fmt.Errorf("create reload request: %w", err)
+	globalPatch := GlobalPatch{
+		RTSPAddress:       desired.RTSPAddress,
+		HLS:               desired.HLS,
+		WebRTC:            desired.WebRTC,
+		API:               desired.API,
+		APIAddress:        desired.APIAddress,
+		AuthInternalUsers: desired.AuthInternalUsers,
 	}
-	g.applyReloadAuth(req)
 
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("reload mediamtx via HTTP: %w", err)
+	if err := g.doJSON(ctx, http.MethodPatch, "v3/config/global/patch", globalPatch); err != nil {
+		return fmt.Errorf("patch mediamtx global config: %w", err)
 	}
-	defer resp.Body.Close()
+	if err := g.doJSON(ctx, http.MethodPatch, "v3/config/pathdefaults/patch", desired.PathDefaults); err != nil {
+		return fmt.Errorf("patch mediamtx path defaults: %w", err)
+	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("reload mediamtx via HTTP: status %s", resp.Status)
+	for name := range existing.Paths {
+		if _, ok := desired.Paths[name]; !ok {
+			endpoint := fmt.Sprintf("v3/config/paths/delete/%s", url.PathEscape(name))
+			if err := g.doJSON(ctx, http.MethodDelete, endpoint, nil); err != nil {
+				return fmt.Errorf("delete mediamtx path %q: %w", name, err)
+			}
+		}
 	}
+
+	for name, pathCfg := range desired.Paths {
+		endpoint := fmt.Sprintf("v3/config/paths/replace/%s", url.PathEscape(name))
+		method := http.MethodPost
+		if _, ok := existing.Paths[name]; !ok {
+			endpoint = fmt.Sprintf("v3/config/paths/add/%s", url.PathEscape(name))
+		}
+		if err := g.doJSON(ctx, method, endpoint, pathCfg); err != nil {
+			return fmt.Errorf("apply mediamtx path %q: %w", name, err)
+		}
+	}
+
 	return nil
 }
 
-func (g *Generator) applyReloadAuth(req *http.Request) {
+func (g *Generator) applyAPIAuth(req *http.Request) {
 	if g.reloadAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+g.reloadAuthToken)
 		return
@@ -353,6 +385,79 @@ func (g *Generator) applyReloadAuth(req *http.Request) {
 	if g.reloadAuthUser != "" || g.reloadAuthPass != "" {
 		req.SetBasicAuth(g.reloadAuthUser, g.reloadAuthPass)
 	}
+}
+
+func (g *Generator) doJSON(ctx context.Context, method, path string, payload any) error {
+	var body *bytes.Reader
+	if payload != nil {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal request: %w", err)
+		}
+		body = bytes.NewReader(data)
+	} else {
+		body = bytes.NewReader(nil)
+	}
+
+	endpoint, err := g.buildAPIURL(path)
+	if err != nil {
+		return fmt.Errorf("build api url: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	g.applyAPIAuth(req)
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request mediamtx api: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("mediamtx api status %s", resp.Status)
+	}
+	return nil
+}
+
+func (g *Generator) buildAPIURL(path string) (string, error) {
+	base, err := url.Parse(g.apiBaseURL)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasSuffix(base.Path, "/") {
+		base.Path += "/"
+	}
+	rel, err := url.Parse(path)
+	if err != nil {
+		return "", err
+	}
+	return base.ResolveReference(rel).String(), nil
+}
+
+func normalizeAPIBaseURL(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return strings.TrimRight(value, "/")
+	}
+	path := strings.TrimSuffix(u.Path, "/")
+	switch {
+	case strings.HasSuffix(path, "/v3/reload"):
+		path = strings.TrimSuffix(path, "/v3/reload")
+	case strings.HasSuffix(path, "/v3"):
+		path = strings.TrimSuffix(path, "/v3")
+	}
+	u.Path = path
+	return strings.TrimRight(u.String(), "/")
 }
 
 func parseDurationEnv(key string, def time.Duration) time.Duration {
