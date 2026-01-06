@@ -5,7 +5,7 @@ services:
     image: bluenviron/mediamtx:latest
     container_name: mtx-proxy
     volumes:
-      - ./proxy/mediamtx.yml:/mediamtx.yml:ro
+      - ./proxy/mediamtx.yml:/mediamtx.yml:rw
       - ../../recordings:/recordings
     # Não precisa expor tudo pro host em produção.
     # Pra teste, vou expor RTSP do proxy pra você debugar se quiser.
@@ -18,7 +18,7 @@ services:
     image: bluenviron/mediamtx:latest
     container_name: mtx-central
     volumes:
-      - ./central/mediamtx.yml:/mediamtx.yml:ro
+      - ./central/mediamtx.yml:/mediamtx.yml:rw
     ports:
       - "8888:8888"          # HLS
       - "8889:8889"          # WebRTC (HTTP signaling)
