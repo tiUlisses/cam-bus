@@ -11,15 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/sua-org/cam-bus/internal/mqttclient"
-)
-
-const (
-	defaultProxyRTSPBase = "rtsp://localhost:8554"
-	defaultFFmpegBin     = "ffmpeg"
-	defaultSRTPacketSize = 1316
-	defaultSRTPort       = 8890
 )
 
 const (
