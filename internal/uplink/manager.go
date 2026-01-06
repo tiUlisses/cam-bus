@@ -11,6 +11,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sua-org/cam-bus/internal/mqttclient"
+)
+
+const (
+	defaultProxyRTSPBase = "rtsp://localhost:8554"
+	defaultFFmpegBin     = "ffmpeg"
+	defaultSRTPacketSize = 1316
+	defaultSRTPort       = 8890
 )
 
 const (
@@ -67,6 +76,9 @@ func (r Request) Validate() error {
 	if r.CameraID == "" {
 		return errors.New("cameraId required")
 	}
+	<-ctx.Done()
+	log.Printf("[uplink] context canceled, stopping all uplinks")
+	m.stopAll()
 	return nil
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/sua-org/cam-bus/internal/mqttclient"
 	"github.com/sua-org/cam-bus/internal/storage"
 	"github.com/sua-org/cam-bus/internal/supervisor"
+	"github.com/sua-org/cam-bus/internal/uplink"
 )
 
 func main() {
