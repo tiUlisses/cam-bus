@@ -35,12 +35,17 @@ as credenciais conforme a versão do MediaMTX:
 api: yes
 apiAddress: :9997
 
-# Usuário/senha (versões recentes)
-apiUser: admin
-apiPass: secret
-
-# OU token bearer (dependendo da versão)
-# apiToken: seu-token
+# Usuário/senha (MediaMTX recente)
+authInternalUsers:
+  - user: any
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+  - user: admin
+    pass: secret
+    permissions:
+      - action: api
 ```
 
 ### Configurar o .env do cam-bus
@@ -64,22 +69,16 @@ MTX_PROXY_RELOAD_PASS="secret"
 ```
 
 Se o cam-bus reescrever o `mediamtx.yml` do proxy, defina também as credenciais
-da API para preservá-las no arquivo gerado:
+da API para gerar `authInternalUsers` no arquivo:
 
 ```bash
 MTX_PROXY_API_USER="admin"
 MTX_PROXY_API_PASS="secret"
 ```
 
-Ou usando token bearer:
+Ou usando token bearer apenas para o reload:
 
 ```bash
 MTX_PROXY_RELOAD_URL="http://mediamtx.local:9997/v3/reload"
 MTX_PROXY_RELOAD_TOKEN="seu-token"
-```
-
-Com token bearer, use:
-
-```bash
-MTX_PROXY_API_TOKEN="seu-token"
 ```
