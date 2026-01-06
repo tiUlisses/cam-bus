@@ -11,6 +11,7 @@ services:
     # Pra teste, vou expor RTSP do proxy pra você debugar se quiser.
     ports:
       - "8554:8554"   # RTSP (debug)
+      - "9997:9997"   # API (reload config)
     networks: [mtxnet]
 
   mtx-central:
@@ -29,20 +30,6 @@ services:
       - MTX_WEBRTCADDITIONALHOSTS=${WEBRTC_ADDITIONAL_HOSTS:-localhost}
     networks: [mtxnet]
     depends_on: [mtx-proxy]
-
-  uplink-srt:
-    image: linuxserver/ffmpeg:latest
-    container_name: uplink-srt
-    restart: unless-stopped
-    depends_on:
-      - mtx-proxy
-      - mtx-central
-    networks: [mtxnet]
-    command: >
-      -rtsp_transport tcp
-      -i rtsp://mtx-proxy:8554/cam1
-      -c copy -f mpegts
-      "srt://mtx-central:8890?streamid=publish:cam1&pkt_size=1316"
 
 networks:
   mtxnet:

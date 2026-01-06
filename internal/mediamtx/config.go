@@ -24,6 +24,11 @@ const maxRecordDeleteAfter = 10 * time.Minute
 
 // Config representa o YAML mínimo do MediaMTX para caminhos dinâmicos.
 type Config struct {
+	RTSPAddress  string               `yaml:"rtspAddress,omitempty"`
+	HLS          bool                 `yaml:"hls"`
+	WebRTC       bool                 `yaml:"webrtc"`
+	API          bool                 `yaml:"api"`
+	APIAddress   string               `yaml:"apiAddress,omitempty"`
 	PathDefaults PathDefaults          `yaml:"pathDefaults"`
 	Paths        map[string]PathConfig `yaml:"paths"`
 }
@@ -120,6 +125,11 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 
 func buildConfig(cameras []core.CameraInfo, retention time.Duration) Config {
 	cfg := Config{
+		RTSPAddress: ":8554",
+		HLS:         false,
+		WebRTC:      false,
+		API:         true,
+		APIAddress:  ":9997",
 		PathDefaults: PathDefaults{
 			Record:                true,
 			RecordPath:            "/recordings/%path/%Y-%m-%d_%H-%M-%S-%f",
