@@ -53,9 +53,23 @@ MTX_PROXY_RELOAD_USER="admin"
 MTX_PROXY_RELOAD_PASS="secret"
 ```
 
+Se o cam-bus reescrever o `mediamtx.yml` do proxy, defina também as credenciais
+da API para preservá-las no arquivo gerado:
+
+```bash
+MTX_PROXY_API_USER="admin"
+MTX_PROXY_API_PASS="secret"
+```
+
 Ou usando token bearer:
 
 ```bash
 MTX_PROXY_RELOAD_URL="http://mediamtx.local:9997/v3/reload"
 MTX_PROXY_RELOAD_TOKEN="seu-token"
+```
+
+Com token bearer, use:
+
+```bash
+MTX_PROXY_API_TOKEN="seu-token"
 ```

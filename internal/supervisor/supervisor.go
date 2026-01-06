@@ -604,6 +604,11 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 		log.Printf("[supervisor] record_retention_minutes inválido para %s, usando 0", info.DeviceID)
 		info.RecordRetentionMinutes = 0
 	}
+	if info.RecordRetentionMinutes > 0 {
+		info.RecordEnabled = true
+	} else {
+		info.RecordEnabled = false
+	}
 	if info.PreRollSeconds < 0 {
 		log.Printf("[supervisor] pre_roll_seconds inválido para %s, usando 0", info.DeviceID)
 		info.PreRollSeconds = 0

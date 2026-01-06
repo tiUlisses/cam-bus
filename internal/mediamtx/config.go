@@ -29,6 +29,9 @@ type Config struct {
 	WebRTC       bool                 `yaml:"webrtc"`
 	API          bool                 `yaml:"api"`
 	APIAddress   string               `yaml:"apiAddress,omitempty"`
+	APIUser      string               `yaml:"apiUser,omitempty"`
+	APIPass      string               `yaml:"apiPass,omitempty"`
+	APIToken     string               `yaml:"apiToken,omitempty"`
 	PathDefaults PathDefaults          `yaml:"pathDefaults"`
 	Paths        map[string]PathConfig `yaml:"paths"`
 }
@@ -57,6 +60,9 @@ type Generator struct {
 	reloadAuthUser    string
 	reloadAuthPass    string
 	reloadAuthToken   string
+	apiUser           string
+	apiPass           string
+	apiToken          string
 	recordDeleteAfter time.Duration
 	httpClient        *http.Client
 	mu                sync.Mutex
@@ -67,6 +73,7 @@ type Generator struct {
 // MTX_PROXY_RELOAD_PID ou MTX_PROXY_PID definem o PID para SIGHUP.
 // MTX_PROXY_RELOAD_URL define um endpoint HTTP para reload.
 // MTX_PROXY_RELOAD_USER/MTX_PROXY_RELOAD_PASS ou MTX_PROXY_RELOAD_TOKEN definem credenciais para reload HTTP.
+// MTX_PROXY_API_USER/MTX_PROXY_API_PASS ou MTX_PROXY_API_TOKEN preservam credenciais da API no YAML gerado.
 // MTX_PROXY_RECORD_DELETE_AFTER (opcional) ajusta a retenção, limitada a 10m.
 func NewGeneratorFromEnv() *Generator {
 	path := strings.TrimSpace(os.Getenv("MTX_PROXY_CONFIG_PATH"))
@@ -83,6 +90,9 @@ func NewGeneratorFromEnv() *Generator {
 	reloadUser := strings.TrimSpace(os.Getenv("MTX_PROXY_RELOAD_USER"))
 	reloadPass := strings.TrimSpace(os.Getenv("MTX_PROXY_RELOAD_PASS"))
 	reloadToken := strings.TrimSpace(os.Getenv("MTX_PROXY_RELOAD_TOKEN"))
+	apiUser := strings.TrimSpace(os.Getenv("MTX_PROXY_API_USER"))
+	apiPass := strings.TrimSpace(os.Getenv("MTX_PROXY_API_PASS"))
+	apiToken := strings.TrimSpace(os.Getenv("MTX_PROXY_API_TOKEN"))
 
 	retention := parseDurationEnv("MTX_PROXY_RECORD_DELETE_AFTER", maxRecordDeleteAfter)
 	if retention > maxRecordDeleteAfter {
@@ -96,6 +106,9 @@ func NewGeneratorFromEnv() *Generator {
 		reloadAuthUser:    reloadUser,
 		reloadAuthPass:    reloadPass,
 		reloadAuthToken:   reloadToken,
+		apiUser:           apiUser,
+		apiPass:           apiPass,
+		apiToken:          apiToken,
 		recordDeleteAfter: retention,
 		httpClient:        &http.Client{Timeout: 5 * time.Second},
 	}
@@ -110,12 +123,17 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	cfg := buildConfig(cameras, g.recordDeleteAfter)
-	existingEqual, err := g.configMatchesFile(cfg)
+	existing, exists, err := g.readExistingConfig()
 	if err != nil {
 		return err
 	}
-	if existingEqual {
+	cfg := buildConfig(cameras, g.recordDeleteAfter, g.apiUser, g.apiPass, g.apiToken)
+	if g.apiUser == "" && g.apiPass == "" && g.apiToken == "" {
+		cfg.APIUser = existing.APIUser
+		cfg.APIPass = existing.APIPass
+		cfg.APIToken = existing.APIToken
+	}
+	if exists && reflect.DeepEqual(existing, cfg) {
 		return nil
 	}
 
@@ -134,13 +152,16 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	return nil
 }
 
-func buildConfig(cameras []core.CameraInfo, retention time.Duration) Config {
+func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, apiPass, apiToken string) Config {
 	cfg := Config{
 		RTSPAddress: ":8554",
 		HLS:         false,
 		WebRTC:      false,
 		API:         true,
 		APIAddress:  ":9997",
+		APIUser:     apiUser,
+		APIPass:     apiPass,
+		APIToken:    apiToken,
 		PathDefaults: PathDefaults{
 			Record:                true,
 			RecordPath:            "/recordings/%path/%Y-%m-%d_%H-%M-%S-%f",
@@ -204,21 +225,21 @@ func retentionForCamera(info core.CameraInfo, defaultRetention time.Duration) ti
 	return retention
 }
 
-func (g *Generator) configMatchesFile(cfg Config) (bool, error) {
+func (g *Generator) readExistingConfig() (Config, bool, error) {
 	data, err := os.ReadFile(g.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			return Config{}, false, nil
 		}
-		return false, fmt.Errorf("read mediamtx config: %w", err)
+		return Config{}, false, fmt.Errorf("read mediamtx config: %w", err)
 	}
 
 	var existing Config
 	if err := yaml.Unmarshal(data, &existing); err != nil {
-		return false, nil
+		return Config{}, false, nil
 	}
 
-	return reflect.DeepEqual(existing, cfg), nil
+	return existing, true, nil
 }
 
 func marshalConfig(cfg Config) ([]byte, error) {
