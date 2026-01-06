@@ -11,23 +11,19 @@ webrtc: no
 api: yes
 apiAddress: :9997
 
-# authInternalUsers:
-#   # Mantém publish/read/playback abertos (equivalente ao comportamento default).
-#   - user: any
-#     permissions:
-#       - action: publish
-#       - action: read
-#       - action: playback
-#   # Usuário dedicado ao acesso da API
-#   - user: admin
-#     pass: secret
-#     permissions:
-#       - action: api
-
-# (Opcional) habilitar playback depois (pra exportar MP4 de um intervalo via /get).
-# playback: yes
-# playbackAddress: :9996
-
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+        path:
+      - action: read
+        path:
+      - action: playback
+        path:
+      - action: api
 pathDefaults:
   # Para gravação constante:
   record: yes
