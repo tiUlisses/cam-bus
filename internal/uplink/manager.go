@@ -1,8 +1,11 @@
 package uplink
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -10,13 +13,47 @@ import (
 	"time"
 )
 
+const (
+	defaultProxyRTSPBase = "rtsp://localhost:8554"
+	defaultFFmpegBin     = "ffmpeg"
+	defaultSRTPacketSize = 1316
+	defaultSRTPort       = 8890
+)
+
+type Manager struct {
+	ffmpegBin          string
+	proxyRTSPBase      string
+	defaultCentralHost string
+	defaultSRTPort     int
+	mu                 sync.Mutex
+	uplinks            map[string]*uplinkProcess
+}
+
+type uplinkProcess struct {
+	cameraKey string
+	payload   Request
+	cancel    context.CancelFunc
+	cmd       *exec.Cmd
+	ttlTimer  *time.Timer
+}
+
 type Request struct {
 	CameraID       string `json:"cameraId"`
 	ProxyPath      string `json:"proxyPath"`
 	CentralHost    string `json:"centralHost"`
-	CentralSrtPort int    `json:"centralSrtPort"`
+	CentralSRTPort int    `json:"centralSrtPort"`
 	CentralPath    string `json:"centralPath"`
 	TTLSeconds     int    `json:"ttlSeconds"`
+}
+
+func NewManagerFromEnv() *Manager {
+	return &Manager{
+		ffmpegBin:          getenv("UPLINK_FFMPEG_BIN", defaultFFmpegBin),
+		proxyRTSPBase:      strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/"),
+		defaultCentralHost: strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST")),
+		defaultSRTPort:     getenvInt("UPLINK_CENTRAL_SRT_PORT", defaultSRTPort),
+		uplinks:            make(map[string]*uplinkProcess),
+	}
 }
 
 func (r *Request) Normalize() {
@@ -28,212 +65,211 @@ func (r *Request) Normalize() {
 
 func (r Request) Validate() error {
 	if r.CameraID == "" {
-		return fmt.Errorf("cameraId obrigatório")
-	}
-	if r.ProxyPath == "" {
-		return fmt.Errorf("proxyPath obrigatório")
-	}
-	if r.CentralHost == "" {
-		return fmt.Errorf("centralHost obrigatório")
-	}
-	if r.CentralSrtPort <= 0 {
-		return fmt.Errorf("centralSrtPort inválido")
-	}
-	if r.CentralPath == "" {
-		return fmt.Errorf("centralPath obrigatório")
-	}
-	if r.TTLSeconds <= 0 {
-		return fmt.Errorf("ttlSeconds inválido")
+		return errors.New("cameraId required")
 	}
 	return nil
 }
 
-type Manager struct {
-	mu        sync.Mutex
-	processes map[string]*processEntry
-	command   string
-}
-
-type processEntry struct {
-	cmd       *exec.Cmd
-	watchers  int
-	ttl       time.Duration
-	stopTimer *time.Timer
-}
-
-func NewManagerFromEnv() *Manager {
-	command := strings.TrimSpace(os.Getenv("UPLINK_COMMAND"))
-	if command == "" {
-		command = "ffmpeg"
-	}
-	return &Manager{
-		processes: make(map[string]*processEntry),
-		command:   command,
-	}
-}
-
 func (m *Manager) Start(req Request) error {
-	req.Normalize()
-	if err := req.Validate(); err != nil {
+	req = m.applyDefaults(req)
+	if err := validateStart(req); err != nil {
 		return err
 	}
+	cameraKey := keyFor(req)
+	return m.startUplink(cameraKey, req)
+}
 
-	inputURL := fmt.Sprintf("rtsp://mtx-proxy:8554/%s", strings.TrimPrefix(req.ProxyPath, "/"))
-	outputURL := fmt.Sprintf(
-		"srt://%s:%d?streamid=publish:%s",
-		req.CentralHost,
-		req.CentralSrtPort,
-		strings.TrimPrefix(req.CentralPath, "/"),
-	)
-	ttl := time.Duration(req.TTLSeconds) * time.Second
+func (m *Manager) Stop(req Request) error {
+	req = m.applyDefaults(req)
+	cameraKey := keyFor(req)
+	return m.stopUplink(cameraKey, "stop command")
+}
 
+func (m *Manager) StopAll() {
 	m.mu.Lock()
-	if entry, ok := m.processes[req.CameraID]; ok {
-		entry.watchers++
-		entry.ttl = ttl
-		if entry.stopTimer != nil {
-			entry.stopTimer.Stop()
-			entry.stopTimer = nil
+	defer m.mu.Unlock()
+
+	for key, proc := range m.uplinks {
+		m.stopProcess(proc, "shutdown")
+		delete(m.uplinks, key)
+	}
+}
+
+func (m *Manager) applyDefaults(req Request) Request {
+	if req.ProxyPath == "" {
+		req.ProxyPath = req.CameraID
+	}
+	if req.CentralHost == "" {
+		req.CentralHost = m.defaultCentralHost
+	}
+	if req.CentralSRTPort <= 0 {
+		req.CentralSRTPort = m.defaultSRTPort
+	}
+	return req
+}
+
+func validateStart(req Request) error {
+	if req.CameraID == "" {
+		return errors.New("cameraId required")
+	}
+	if req.ProxyPath == "" {
+		return errors.New("proxyPath required")
+	}
+	if req.CentralHost == "" {
+		return errors.New("centralHost required")
+	}
+	if req.CentralPath == "" {
+		return errors.New("centralPath required")
+	}
+	return nil
+}
+
+func keyFor(req Request) string {
+	if req.CentralPath != "" {
+		return req.CentralPath
+	}
+	return req.CameraID
+}
+
+func (m *Manager) startUplink(cameraKey string, req Request) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if existing, ok := m.uplinks[cameraKey]; ok {
+		if sameRequest(existing.payload, req) {
+			log.Printf("[uplink] already running for %s, refreshing TTL", cameraKey)
+			m.refreshTTL(existing, req.TTLSeconds)
+			return nil
 		}
-		m.mu.Unlock()
-		log.Printf("[uplink] camera %s already running, watchers=%d", req.CameraID, entry.watchers)
-		return nil
+		m.stopProcess(existing, "restarting with new payload")
 	}
 
-	cmd := exec.Command(m.command,
+	proxyURL := fmt.Sprintf("%s/%s", m.proxyRTSPBase, strings.TrimPrefix(req.ProxyPath, "/"))
+	srtURL := buildSRTURL(req.CentralHost, req.CentralSRTPort, req.CentralPath)
+
+	cmdCtx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(cmdCtx, m.ffmpegBin,
 		"-rtsp_transport", "tcp",
-		"-i", inputURL,
+		"-i", proxyURL,
 		"-c", "copy",
 		"-f", "mpegts",
-		outputURL,
+		srtURL,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
+		cancel()
+		return fmt.Errorf("start ffmpeg: %w", err)
+	}
+
+	proc := &uplinkProcess{
+		cameraKey: cameraKey,
+		payload:   req,
+		cancel:    cancel,
+		cmd:       cmd,
+	}
+	m.uplinks[cameraKey] = proc
+	m.refreshTTL(proc, req.TTLSeconds)
+
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			log.Printf("[uplink] ffmpeg exited for %s: %v", cameraKey, err)
+		} else {
+			log.Printf("[uplink] ffmpeg exited for %s", cameraKey)
+		}
+		m.mu.Lock()
+		if current, ok := m.uplinks[cameraKey]; ok && current == proc {
+			delete(m.uplinks, cameraKey)
+		}
 		m.mu.Unlock()
-		return fmt.Errorf("start uplink command: %w", err)
-	}
+	}()
 
-	entry := &processEntry{
-		cmd:      cmd,
-		watchers: 1,
-		ttl:      ttl,
-	}
-	m.processes[req.CameraID] = entry
-	m.mu.Unlock()
-
-	log.Printf("[uplink] started camera %s -> %s", req.CameraID, outputURL)
-	go m.waitForExit(req.CameraID, cmd)
+	log.Printf("[uplink] started for %s -> %s", cameraKey, srtURL)
 	return nil
 }
 
-func (m *Manager) Stop(req Request) error {
-	req.Normalize()
-	if err := req.Validate(); err != nil {
-		return err
-	}
-
-	ttl := time.Duration(req.TTLSeconds) * time.Second
-
+func (m *Manager) stopUplink(cameraKey, reason string) error {
 	m.mu.Lock()
-	entry, ok := m.processes[req.CameraID]
+	defer m.mu.Unlock()
+
+	proc, ok := m.uplinks[cameraKey]
 	if !ok {
-		m.mu.Unlock()
-		log.Printf("[uplink] camera %s not running", req.CameraID)
-		return nil
+		return fmt.Errorf("uplink not running")
 	}
-
-	if entry.watchers > 0 {
-		entry.watchers--
-	}
-	entry.ttl = ttl
-	if entry.watchers > 0 {
-		m.mu.Unlock()
-		log.Printf("[uplink] camera %s still has watchers=%d", req.CameraID, entry.watchers)
-		return nil
-	}
-
-	if entry.stopTimer != nil {
-		entry.stopTimer.Stop()
-		entry.stopTimer = nil
-	}
-
-	if ttl <= 0 {
-		cmd := entry.cmd
-		delete(m.processes, req.CameraID)
-		m.mu.Unlock()
-		m.stopCommand(req.CameraID, cmd, "stop")
-		return nil
-	}
-
-	entry.stopTimer = time.AfterFunc(ttl, func() {
-		m.expire(req.CameraID)
-	})
-	m.mu.Unlock()
-	log.Printf("[uplink] camera %s scheduled to stop in %s", req.CameraID, ttl)
+	m.stopProcess(proc, reason)
+	delete(m.uplinks, cameraKey)
 	return nil
 }
 
-func (m *Manager) StopAll() {
-	m.mu.Lock()
-	entries := make(map[string]*processEntry, len(m.processes))
-	for cameraID, entry := range m.processes {
-		entries[cameraID] = entry
+func (m *Manager) stopProcess(proc *uplinkProcess, reason string) {
+	if proc.ttlTimer != nil {
+		proc.ttlTimer.Stop()
 	}
-	m.processes = make(map[string]*processEntry)
-	m.mu.Unlock()
+	log.Printf("[uplink] stopping %s: %s", proc.cameraKey, reason)
+	proc.cancel()
+}
 
-	for cameraID, entry := range entries {
-		if entry.stopTimer != nil {
-			entry.stopTimer.Stop()
+func (m *Manager) refreshTTL(proc *uplinkProcess, ttlSeconds int) {
+	if proc.ttlTimer != nil {
+		proc.ttlTimer.Stop()
+		proc.ttlTimer = nil
+	}
+	if ttlSeconds <= 0 {
+		return
+	}
+	proc.ttlTimer = time.AfterFunc(time.Duration(ttlSeconds)*time.Second, func() {
+		if err := m.stopUplink(proc.cameraKey, "ttl expired"); err != nil {
+			log.Printf("[uplink] ttl stop failed for %s: %v", proc.cameraKey, err)
 		}
-		m.stopCommand(cameraID, entry.cmd, "shutdown")
-	}
+	})
 }
 
-func (m *Manager) expire(cameraID string) {
-	var cmd *exec.Cmd
-
-	m.mu.Lock()
-	entry, ok := m.processes[cameraID]
-	if !ok || entry.watchers > 0 {
-		m.mu.Unlock()
-		return
-	}
-	cmd = entry.cmd
-	delete(m.processes, cameraID)
-	m.mu.Unlock()
-
-	m.stopCommand(cameraID, cmd, "ttl")
+func sameRequest(a, b Request) bool {
+	return a.CameraID == b.CameraID &&
+		a.ProxyPath == b.ProxyPath &&
+		a.CentralHost == b.CentralHost &&
+		normalizePort(a.CentralSRTPort) == normalizePort(b.CentralSRTPort) &&
+		a.CentralPath == b.CentralPath
 }
 
-func (m *Manager) waitForExit(cameraID string, cmd *exec.Cmd) {
-	err := cmd.Wait()
-	if err != nil {
-		log.Printf("[uplink] camera %s exited with error: %v", cameraID, err)
-	} else {
-		log.Printf("[uplink] camera %s exited", cameraID)
+func normalizePort(port int) int {
+	if port <= 0 {
+		return defaultSRTPort
 	}
+	return port
+}
 
-	m.mu.Lock()
-	entry, ok := m.processes[cameraID]
-	if ok && entry.cmd == cmd {
-		if entry.stopTimer != nil {
-			entry.stopTimer.Stop()
+func buildSRTURL(host string, port int, path string) string {
+	if port <= 0 {
+		port = defaultSRTPort
+	}
+	values := url.Values{}
+	values.Set("streamid", fmt.Sprintf("publish:%s", path))
+	values.Set("pkt_size", fmt.Sprintf("%d", defaultSRTPacketSize))
+
+	u := url.URL{
+		Scheme:   "srt",
+		Host:     fmt.Sprintf("%s:%d", host, port),
+		RawQuery: values.Encode(),
+	}
+	return u.String()
+}
+
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func getenvInt(key string, def int) int {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		var x int
+		if _, err := fmt.Sscanf(v, "%d", &x); err == nil && x > 0 {
+			return x
 		}
-		delete(m.processes, cameraID)
 	}
-	m.mu.Unlock()
-}
-
-func (m *Manager) stopCommand(cameraID string, cmd *exec.Cmd, reason string) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-	if err := cmd.Process.Kill(); err != nil {
-		log.Printf("[uplink] failed to stop camera %s (%s): %v", cameraID, reason, err)
-		return
-	}
-	log.Printf("[uplink] stopped camera %s (%s)", cameraID, reason)
+	return def
 }
