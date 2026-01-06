@@ -526,6 +526,25 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	// Esperado: base/tenant/building/floor/type/id/info
+	// Exemplo de payload:
+	// {
+	//   "ip": "10.0.0.10",
+	//   "name": "Portaria",
+	//   "manufacturer": "Hikvision",
+	//   "model": "DS-2CD",
+	//   "username": "admin",
+	//   "password": "secret",
+	//   "port": 443,
+	//   "use_tls": true,
+	//   "enabled": true,
+	//   "analytics": ["faceCapture"],
+	//   "rtsp_url": "rtsp://10.0.0.10:554/Streaming/Channels/101",
+	//   "proxy_path": "camera-001",
+	//   "central_path": "hq/camera-001",
+	//   "record_enabled": true,
+	//   "record_retention_minutes": 1440,
+	//   "pre_roll_seconds": 5
+	// }
 	parts := strings.Split(topic, "/")
 	baseParts := strings.Split(s.baseTopic, "/")
 
@@ -553,6 +572,24 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	info.Floor = floor
 	info.DeviceType = devType
 	info.DeviceID = devID
+
+	info.RTSPURL = strings.TrimSpace(info.RTSPURL)
+	info.ProxyPath = strings.TrimSpace(info.ProxyPath)
+	info.CentralPath = strings.TrimSpace(info.CentralPath)
+	if info.ProxyPath == "" {
+		info.ProxyPath = info.DeviceID
+	}
+	if info.CentralPath == "" {
+		info.CentralPath = info.ProxyPath
+	}
+	if info.RecordRetentionMinutes < 0 {
+		log.Printf("[supervisor] record_retention_minutes inválido para %s, usando 0", info.DeviceID)
+		info.RecordRetentionMinutes = 0
+	}
+	if info.PreRollSeconds < 0 {
+		log.Printf("[supervisor] pre_roll_seconds inválido para %s, usando 0", info.DeviceID)
+		info.PreRollSeconds = 0
+	}
 
 	// TODO: filtro de shard, se quiser (shard por camera, etc.)
 
@@ -594,7 +631,13 @@ func cameraInfoEqual(a, b core.CameraInfo) bool {
 		a.Password != b.Password ||
 		a.UseTLS != b.UseTLS ||
 		a.Enabled != b.Enabled ||
-		a.Shard != b.Shard {
+		a.Shard != b.Shard ||
+		a.RTSPURL != b.RTSPURL ||
+		a.ProxyPath != b.ProxyPath ||
+		a.CentralPath != b.CentralPath ||
+		a.RecordEnabled != b.RecordEnabled ||
+		a.RecordRetentionMinutes != b.RecordRetentionMinutes ||
+		a.PreRollSeconds != b.PreRollSeconds {
 		return false
 	}
 
