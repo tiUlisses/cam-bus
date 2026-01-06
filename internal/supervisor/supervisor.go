@@ -587,11 +587,16 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	info.RTSPURL = strings.TrimSpace(info.RTSPURL)
 	info.ProxyPath = strings.TrimSpace(info.ProxyPath)
 	info.CentralPath = strings.TrimSpace(info.CentralPath)
+	defaultPath := strings.TrimSpace(info.DeviceID)
+	if defaultPath == "" {
+		defaultPath = fmt.Sprintf("%s_%s_%s_%s", info.Tenant, info.Building, info.Floor, info.DeviceID)
+		defaultPath = strings.Trim(defaultPath, "_")
+	}
 	if info.ProxyPath == "" {
-		info.ProxyPath = info.DeviceID
+		info.ProxyPath = defaultPath
 	}
 	if info.CentralPath == "" {
-		info.CentralPath = info.ProxyPath
+		info.CentralPath = defaultPath
 	}
 	if info.RecordRetentionMinutes < 0 {
 		log.Printf("[supervisor] record_retention_minutes inválido para %s, usando 0", info.DeviceID)
