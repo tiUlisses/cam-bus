@@ -93,6 +93,12 @@ func NewGeneratorFromEnv() *Generator {
 	apiUser := strings.TrimSpace(os.Getenv("MTX_PROXY_API_USER"))
 	apiPass := strings.TrimSpace(os.Getenv("MTX_PROXY_API_PASS"))
 	apiToken := strings.TrimSpace(os.Getenv("MTX_PROXY_API_TOKEN"))
+	if reloadUser == "" && reloadPass == "" && reloadToken == "" {
+		// Fallback evita 401 quando apiUser/apiPass estão habilitados no MediaMTX.
+		reloadUser = apiUser
+		reloadPass = apiPass
+		reloadToken = apiToken
+	}
 
 	retention := parseDurationEnv("MTX_PROXY_RECORD_DELETE_AFTER", maxRecordDeleteAfter)
 	if retention > maxRecordDeleteAfter {
