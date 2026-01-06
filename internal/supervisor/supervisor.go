@@ -31,6 +31,7 @@ type Supervisor struct {
 	mtxGen  *mediamtx.Generator
 
 	mu             sync.Mutex
+	cameras        map[string]core.CameraInfo
 	workers        map[string]*cameraWorker
 	statusInterval time.Duration
 	proc           *process.Process // <- NOVO: processo do cam-bus para métricas
@@ -135,6 +136,7 @@ func New(mqtt *mqttclient.Client, baseTopic string) *Supervisor {
 		engines:        eng,
 		uplink:         uplink.NewManagerFromEnv(),
 		mtxGen:         mediamtx.NewGeneratorFromEnv(),
+		cameras:        make(map[string]core.CameraInfo),
 		workers:        make(map[string]*cameraWorker),
 		statusInterval: statusInterval,
 		proc:           procHandle,
@@ -614,9 +616,12 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	// Se a câmera estiver desabilitada, para worker
 	if !info.Enabled {
 		log.Printf("[supervisor] camera %s disabled via info topic, stopping worker", key)
+		s.removeCameraInfo(key)
 		s.stopCamera(key)
 		return
 	}
+
+	s.upsertCameraInfo(key, info)
 
 	// Publica discovery para o Home Assistant (se tiver faceRecognized)
 	if err := s.publishHADiscovery(info); err != nil {
@@ -746,6 +751,7 @@ func (s *Supervisor) startOrUpdateCamera(info core.CameraInfo) {
 	drv, err := drivers.GetDriver(info)
 	if err != nil {
 		log.Printf("[supervisor] no driver for camera %s: %v", key, err)
+		go s.refreshMediaMTXConfig()
 		return
 	}
 
@@ -916,9 +922,21 @@ func (s *Supervisor) snapshotCameraInfos() []core.CameraInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	infos := make([]core.CameraInfo, 0, len(s.workers))
-	for _, w := range s.workers {
-		infos = append(infos, w.info)
+	infos := make([]core.CameraInfo, 0, len(s.cameras))
+	for _, info := range s.cameras {
+		infos = append(infos, info)
 	}
 	return infos
+}
+
+func (s *Supervisor) upsertCameraInfo(key string, info core.CameraInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cameras[key] = info
+}
+
+func (s *Supervisor) removeCameraInfo(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cameras, key)
 }

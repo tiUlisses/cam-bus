@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -245,14 +244,13 @@ func buildSRTURL(host string, port int, path string) string {
 	if port <= 0 {
 		port = defaultSRTPort
 	}
-	values := url.Values{}
-	values.Set("streamid", fmt.Sprintf("publish:%s", path))
-	values.Set("pkt_size", fmt.Sprintf("%d", defaultSRTPacketSize))
+	streamID := fmt.Sprintf("publish:%s", path)
+	query := fmt.Sprintf("streamid=%s&pkt_size=%d", streamID, defaultSRTPacketSize)
 
 	u := url.URL{
 		Scheme:   "srt",
 		Host:     fmt.Sprintf("%s:%d", host, port),
-		RawQuery: values.Encode(),
+		RawQuery: query,
 	}
 	return u.String()
 }
