@@ -629,12 +629,23 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 		log.Printf("[uplink] invalid uplink topic: %s", topic)
 		return
 	}
+	offset := len(baseParts)
+	tenant := parts[offset+0]
+	building := parts[offset+1]
+	devID := parts[offset+4]
 	action := parts[len(parts)-1]
 
 	var req uplink.Request
 	if err := json.Unmarshal(payload, &req); err != nil {
 		log.Printf("[uplink] invalid JSON on %s: %v", topic, err)
 		return
+	}
+	if strings.EqualFold(action, "start") {
+		req.CentralPath = uplink.CentralPathFor(core.CameraInfo{
+			Tenant:   tenant,
+			Building: building,
+			DeviceID: devID,
+		})
 	}
 	req.Normalize()
 	if err := req.Validate(); err != nil {

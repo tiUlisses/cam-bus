@@ -9,6 +9,7 @@ webrtc: yes
 webrtcAddress: :8889
 webrtcLocalUDPAddress: :8189
 
-paths:
-  cam1:
-    source: publisher
+pathDefaults:
+  source: publisher
+
+paths: {}
