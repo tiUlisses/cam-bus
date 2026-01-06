@@ -6,12 +6,23 @@ hls: no
 webrtc: no
 
 # API para reload de config via cam-bus.
-# Para proteger o endpoint, configure credenciais aqui:
-# - Usuário/senha (versões mais recentes): apiUser / apiPass
-# - Token bearer (dependendo da versão): apiToken (ou equivalente)
+# Para proteger o endpoint, configure authInternalUsers (MediaMTX recente).
 # Se habilitar auth, o cam-bus precisa enviar essas credenciais no reload.
 api: yes
 apiAddress: :9997
+
+# authInternalUsers:
+#   # Mantém publish/read/playback abertos (equivalente ao comportamento default).
+#   - user: any
+#     permissions:
+#       - action: publish
+#       - action: read
+#       - action: playback
+#   # Usuário dedicado ao acesso da API
+#   - user: admin
+#     pass: secret
+#     permissions:
+#       - action: api
 
 # (Opcional) habilitar playback depois (pra exportar MP4 de um intervalo via /get).
 # playback: yes

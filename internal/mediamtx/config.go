@@ -24,16 +24,14 @@ const maxRecordDeleteAfter = 10 * time.Minute
 
 // Config representa o YAML mínimo do MediaMTX para caminhos dinâmicos.
 type Config struct {
-	RTSPAddress  string               `yaml:"rtspAddress,omitempty"`
-	HLS          bool                 `yaml:"hls"`
-	WebRTC       bool                 `yaml:"webrtc"`
-	API          bool                 `yaml:"api"`
-	APIAddress   string               `yaml:"apiAddress,omitempty"`
-	APIUser      string               `yaml:"apiUser,omitempty"`
-	APIPass      string               `yaml:"apiPass,omitempty"`
-	APIToken     string               `yaml:"apiToken,omitempty"`
-	PathDefaults PathDefaults          `yaml:"pathDefaults"`
-	Paths        map[string]PathConfig `yaml:"paths"`
+	RTSPAddress       string                `yaml:"rtspAddress,omitempty"`
+	HLS               bool                  `yaml:"hls"`
+	WebRTC            bool                  `yaml:"webrtc"`
+	API               bool                  `yaml:"api"`
+	APIAddress        string                `yaml:"apiAddress,omitempty"`
+	AuthInternalUsers []AuthInternalUser    `yaml:"authInternalUsers,omitempty"`
+	PathDefaults      PathDefaults          `yaml:"pathDefaults"`
+	Paths             map[string]PathConfig `yaml:"paths"`
 }
 
 type PathDefaults struct {
@@ -52,6 +50,18 @@ type PathConfig struct {
 	RecordDeleteAfter string `yaml:"recordDeleteAfter,omitempty"`
 }
 
+type AuthInternalUser struct {
+	User        string           `yaml:"user"`
+	Pass        string           `yaml:"pass,omitempty"`
+	IPs         []string         `yaml:"ips,omitempty"`
+	Permissions []AuthPermission `yaml:"permissions,omitempty"`
+}
+
+type AuthPermission struct {
+	Action string `yaml:"action"`
+	Path   string `yaml:"path,omitempty"`
+}
+
 // Generator gera e aplica configs do MediaMTX a partir de câmeras ativas.
 type Generator struct {
 	path              string
@@ -62,7 +72,6 @@ type Generator struct {
 	reloadAuthToken   string
 	apiUser           string
 	apiPass           string
-	apiToken          string
 	recordDeleteAfter time.Duration
 	httpClient        *http.Client
 	mu                sync.Mutex
@@ -73,7 +82,8 @@ type Generator struct {
 // MTX_PROXY_RELOAD_PID ou MTX_PROXY_PID definem o PID para SIGHUP.
 // MTX_PROXY_RELOAD_URL define um endpoint HTTP para reload.
 // MTX_PROXY_RELOAD_USER/MTX_PROXY_RELOAD_PASS ou MTX_PROXY_RELOAD_TOKEN definem credenciais para reload HTTP.
-// MTX_PROXY_API_USER/MTX_PROXY_API_PASS ou MTX_PROXY_API_TOKEN preservam credenciais da API no YAML gerado.
+// MTX_PROXY_API_USER/MTX_PROXY_API_PASS configuram authInternalUsers no YAML gerado.
+// MTX_PROXY_API_TOKEN (legado) pode ser usado como fallback para o reload token.
 // MTX_PROXY_RECORD_DELETE_AFTER (opcional) ajusta a retenção, limitada a 10m.
 func NewGeneratorFromEnv() *Generator {
 	path := strings.TrimSpace(os.Getenv("MTX_PROXY_CONFIG_PATH"))
@@ -94,7 +104,7 @@ func NewGeneratorFromEnv() *Generator {
 	apiPass := strings.TrimSpace(os.Getenv("MTX_PROXY_API_PASS"))
 	apiToken := strings.TrimSpace(os.Getenv("MTX_PROXY_API_TOKEN"))
 	if reloadUser == "" && reloadPass == "" && reloadToken == "" {
-		// Fallback evita 401 quando apiUser/apiPass estão habilitados no MediaMTX.
+		// Fallback evita 401 quando authInternalUsers está habilitado no MediaMTX.
 		reloadUser = apiUser
 		reloadPass = apiPass
 		reloadToken = apiToken
@@ -114,7 +124,6 @@ func NewGeneratorFromEnv() *Generator {
 		reloadAuthToken:   reloadToken,
 		apiUser:           apiUser,
 		apiPass:           apiPass,
-		apiToken:          apiToken,
 		recordDeleteAfter: retention,
 		httpClient:        &http.Client{Timeout: 5 * time.Second},
 	}
@@ -133,11 +142,9 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	if err != nil {
 		return err
 	}
-	cfg := buildConfig(cameras, g.recordDeleteAfter, g.apiUser, g.apiPass, g.apiToken)
-	if g.apiUser == "" && g.apiPass == "" && g.apiToken == "" {
-		cfg.APIUser = existing.APIUser
-		cfg.APIPass = existing.APIPass
-		cfg.APIToken = existing.APIToken
+	cfg := buildConfig(cameras, g.recordDeleteAfter, g.apiUser, g.apiPass)
+	if g.apiUser == "" && g.apiPass == "" {
+		cfg.AuthInternalUsers = existing.AuthInternalUsers
 	}
 	if exists && reflect.DeepEqual(existing, cfg) {
 		return nil
@@ -158,16 +165,14 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	return nil
 }
 
-func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, apiPass, apiToken string) Config {
+func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, apiPass string) Config {
 	cfg := Config{
-		RTSPAddress: ":8554",
-		HLS:         false,
-		WebRTC:      false,
-		API:         true,
-		APIAddress:  ":9997",
-		APIUser:     apiUser,
-		APIPass:     apiPass,
-		APIToken:    apiToken,
+		RTSPAddress:       ":8554",
+		HLS:               false,
+		WebRTC:            false,
+		API:               true,
+		APIAddress:        ":9997",
+		AuthInternalUsers: authUsersForAPI(apiUser, apiPass),
 		PathDefaults: PathDefaults{
 			Record:                true,
 			RecordPath:            "/recordings/%path/%Y-%m-%d_%H-%M-%S-%f",
@@ -198,6 +203,31 @@ func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, ap
 	}
 
 	return cfg
+}
+
+func authUsersForAPI(apiUser, apiPass string) []AuthInternalUser {
+	if apiUser == "" && apiPass == "" {
+		return nil
+	}
+	return []AuthInternalUser{
+		{
+			User: "any",
+			IPs:  []string{},
+			Permissions: []AuthPermission{
+				{Action: "publish"},
+				{Action: "read"},
+				{Action: "playback"},
+			},
+		},
+		{
+			User: apiUser,
+			Pass: apiPass,
+			IPs:  []string{},
+			Permissions: []AuthPermission{
+				{Action: "api"},
+			},
+		},
+	}
 }
 
 func pathConfigFor(info core.CameraInfo, rtspURL string, defaultRetention time.Duration) PathConfig {
