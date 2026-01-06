@@ -45,6 +45,16 @@ apiPass: secret
 
 ### Configurar o .env do cam-bus
 
+Use usuário/senha. Se o cam-bus estiver no mesmo `docker-compose`/rede do
+`infra/mediamtx/docker-compose.yml`, prefira apontar para o serviço do proxy:
+
+```bash
+MTX_PROXY_RELOAD_URL="http://mtx-proxy:9997/v3/reload"
+```
+
+Se quiser manter o hostname atual, crie um `network_alias: mediamtx.local` no
+serviço `mtx-proxy` do compose e continue usando `mediamtx.local`.
+
 Use usuário/senha:
 
 ```bash
