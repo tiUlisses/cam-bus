@@ -16,6 +16,7 @@ import (
 	"github.com/sua-org/cam-bus/internal/core"
 	"github.com/sua-org/cam-bus/internal/drivers"
 	"github.com/sua-org/cam-bus/internal/engines"
+	"github.com/sua-org/cam-bus/internal/mediamtx"
 	"github.com/sua-org/cam-bus/internal/mqttclient"
 	"github.com/sua-org/cam-bus/internal/uplink"
 )
@@ -27,6 +28,7 @@ type Supervisor struct {
 	shard   string
 	engines *engines.Manager
 	uplink  *uplink.Manager
+	mtxGen  *mediamtx.Generator
 
 	mu             sync.Mutex
 	workers        map[string]*cameraWorker
@@ -132,6 +134,7 @@ func New(mqtt *mqttclient.Client, baseTopic string) *Supervisor {
 		shard:          shard,
 		engines:        eng,
 		uplink:         uplink.NewManagerFromEnv(),
+		mtxGen:         mediamtx.NewGeneratorFromEnv(),
 		workers:        make(map[string]*cameraWorker),
 		statusInterval: statusInterval,
 		proc:           procHandle,
@@ -700,7 +703,13 @@ func (s *Supervisor) startOrUpdateCamera(info core.CameraInfo) {
 	key := s.keyFor(info)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	shouldRefresh := false
+	defer func() {
+		s.mu.Unlock()
+		if shouldRefresh {
+			go s.refreshMediaMTXConfig()
+		}
+	}()
 
 	if w, ok := s.workers[key]; ok {
 		// Já existe worker para essa câmera.
@@ -713,6 +722,7 @@ func (s *Supervisor) startOrUpdateCamera(info core.CameraInfo) {
 		log.Printf("[supervisor] camera %s config changed, restarting worker", key)
 		w.cancel()
 		delete(s.workers, key)
+		shouldRefresh = true
 	}
 
 	drv, err := drivers.GetDriver(info)
@@ -735,6 +745,7 @@ func (s *Supervisor) startOrUpdateCamera(info core.CameraInfo) {
 	}
 
 	s.workers[key] = worker
+	shouldRefresh = true
 
 	if statusAware, ok := drv.(drivers.StatusAwareDriver); ok {
 		statusAware.SetStatusHandler(func(update drivers.StatusUpdate) {
@@ -839,7 +850,13 @@ func (s *Supervisor) collectorStatusTopic(tenant, building string) string {
 
 func (s *Supervisor) stopCamera(key string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	shouldRefresh := false
+	defer func() {
+		s.mu.Unlock()
+		if shouldRefresh {
+			go s.refreshMediaMTXConfig()
+		}
+	}()
 
 	w, ok := s.workers[key]
 	if !ok {
@@ -849,6 +866,7 @@ func (s *Supervisor) stopCamera(key string) {
 	log.Printf("[supervisor] stopping camera worker %s", key)
 	w.cancel()
 	delete(s.workers, key)
+	shouldRefresh = true
 }
 
 func (s *Supervisor) stopAll() {
@@ -863,4 +881,26 @@ func (s *Supervisor) stopAll() {
 	if s.uplink != nil {
 		s.uplink.StopAll()
 	}
+}
+
+func (s *Supervisor) refreshMediaMTXConfig() {
+	if s.mtxGen == nil {
+		return
+	}
+
+	infos := s.snapshotCameraInfos()
+	if err := s.mtxGen.Sync(infos); err != nil {
+		log.Printf("[supervisor] erro ao atualizar config do MediaMTX: %v", err)
+	}
+}
+
+func (s *Supervisor) snapshotCameraInfos() []core.CameraInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	infos := make([]core.CameraInfo, 0, len(s.workers))
+	for _, w := range s.workers {
+		infos = append(infos, w.info)
+	}
+	return infos
 }
