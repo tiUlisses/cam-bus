@@ -67,9 +67,6 @@ func (r Request) Validate() error {
 	if r.CameraID == "" {
 		return errors.New("cameraId required")
 	}
-	<-ctx.Done()
-	log.Printf("[uplink] context canceled, stopping all uplinks")
-	m.stopAll()
 	return nil
 }
 
