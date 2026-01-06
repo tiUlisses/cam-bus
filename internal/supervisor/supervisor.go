@@ -680,9 +680,11 @@ func cameraInfoEqual(a, b core.CameraInfo) bool {
 		a.Floor != b.Floor ||
 		a.DeviceType != b.DeviceType ||
 		a.DeviceID != b.DeviceID ||
+		a.Name != b.Name ||
 		a.Manufacturer != b.Manufacturer ||
 		a.Model != b.Model ||
 		a.IP != b.IP ||
+		a.Port != b.Port ||
 		a.Username != b.Username ||
 		a.Password != b.Password ||
 		a.UseTLS != b.UseTLS ||
