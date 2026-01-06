@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  mtx-proxy:
+    image: bluenviron/mediamtx:latest
+    container_name: mtx-proxy
+    volumes:
+      - ./proxy/mediamtx.yml:/mediamtx.yml:ro
+      - ../../recordings:/recordings
+    # Não precisa expor tudo pro host em produção.
+    # Pra teste, vou expor RTSP do proxy pra você debugar se quiser.
+    ports:
+      - "8554:8554"   # RTSP (debug)
+    networks: [mtxnet]
+
+  mtx-central:
+    image: bluenviron/mediamtx:latest
+    container_name: mtx-central
+    volumes:
+      - ./central/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "8888:8888"          # HLS
+      - "8889:8889"          # WebRTC (HTTP signaling)
+      - "8189:8189/udp"      # WebRTC (ICE/UDP)
+      - "8890:8890/udp"    # SRT
+    environment:
+      # MUITO IMPORTANTE: o WebRTC precisa anunciar um host que o browser alcance.
+      # Em LAN: IP do host (ex: 192.168.0.10). Em cloud: domínio público.
+      - MTX_WEBRTCADDITIONALHOSTS=${WEBRTC_ADDITIONAL_HOSTS:-localhost}
+    networks: [mtxnet]
+    depends_on: [mtx-proxy]
+
+  uplink-srt:
+    image: linuxserver/ffmpeg:latest
+    container_name: uplink-srt
+    restart: unless-stopped
+    depends_on:
+      - mtx-proxy
+      - mtx-central
+    networks: [mtxnet]
+    command: >
+      -rtsp_transport tcp
+      -i rtsp://mtx-proxy:8554/cam1
+      -c copy -f mpegts
+      "srt://mtx-central:8890?streamid=publish:cam1&pkt_size=1316"
+
+networks:
+  mtxnet:
+    driver: bridge

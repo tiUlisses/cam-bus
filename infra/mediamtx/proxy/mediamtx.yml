@@ -1,0 +1,30 @@
+# Proxy / Edge
+rtspAddress: :8554
+
+# Não precisamos servir HLS/WebRTC aqui (fica no central).
+hls: no
+webrtc: no
+
+# (Opcional) habilitar playback depois (pra exportar MP4 de um intervalo via /get).
+# playback: yes
+# playbackAddress: :9996
+
+pathDefaults:
+  # Para gravação constante:
+  record: yes
+  recordPath: /recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordPartDuration: 1s
+  recordSegmentDuration: 1m
+  recordDeleteAfter: 0s   # 0s = não apaga automaticamente (ajuste depois)
+  # Se quiser retenção: 24h, 7d etc.
+
+paths:
+  cam1:
+    # IMPORTANTE:
+    # aqui você coloca o RTSP real da câmera.
+    # Ex: rtsp://user:pass@192.168.0.50:554/Streaming/Channels/101
+    source: rtsp://admin:h0wb3%4012@192.168.94.204:554/live
+
+    # O proxy precisa manter o stream ativo pra gravar:
+    sourceOnDemand: no
