@@ -42,8 +42,6 @@ func main() {
 	defer mqttCli.Close()
 
 	sup := supervisor.New(mqttCli, baseTopic)
-	uplinkMgr := uplink.NewManager(mqttCli, baseTopic)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -55,12 +53,6 @@ func main() {
 			log.Printf("[main] supervisor terminou com erro: %v", err)
 		}
 	}()
-	go func() {
-		if err := uplinkMgr.Run(ctx); err != nil {
-			log.Printf("[main] uplink manager terminou com erro: %v", err)
-		}
-	}()
-
 	<-sig
 	log.Println("[main] sinal recebido, encerrando...")
 	cancel()
