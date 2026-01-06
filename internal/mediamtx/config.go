@@ -54,6 +54,9 @@ type Generator struct {
 	path              string
 	reloadPID         int
 	reloadURL         string
+	reloadAuthUser    string
+	reloadAuthPass    string
+	reloadAuthToken   string
 	recordDeleteAfter time.Duration
 	httpClient        *http.Client
 	mu                sync.Mutex
@@ -63,6 +66,7 @@ type Generator struct {
 // MTX_PROXY_CONFIG_PATH (obrigatório) define o destino do YAML.
 // MTX_PROXY_RELOAD_PID ou MTX_PROXY_PID definem o PID para SIGHUP.
 // MTX_PROXY_RELOAD_URL define um endpoint HTTP para reload.
+// MTX_PROXY_RELOAD_USER/MTX_PROXY_RELOAD_PASS ou MTX_PROXY_RELOAD_TOKEN definem credenciais para reload HTTP.
 // MTX_PROXY_RECORD_DELETE_AFTER (opcional) ajusta a retenção, limitada a 10m.
 func NewGeneratorFromEnv() *Generator {
 	path := strings.TrimSpace(os.Getenv("MTX_PROXY_CONFIG_PATH"))
@@ -76,6 +80,10 @@ func NewGeneratorFromEnv() *Generator {
 		reloadPID = parsePIDEnv("MTX_PROXY_PID")
 	}
 
+	reloadUser := strings.TrimSpace(os.Getenv("MTX_PROXY_RELOAD_USER"))
+	reloadPass := strings.TrimSpace(os.Getenv("MTX_PROXY_RELOAD_PASS"))
+	reloadToken := strings.TrimSpace(os.Getenv("MTX_PROXY_RELOAD_TOKEN"))
+
 	retention := parseDurationEnv("MTX_PROXY_RECORD_DELETE_AFTER", maxRecordDeleteAfter)
 	if retention > maxRecordDeleteAfter {
 		retention = maxRecordDeleteAfter
@@ -85,6 +93,9 @@ func NewGeneratorFromEnv() *Generator {
 		path:              path,
 		reloadPID:         reloadPID,
 		reloadURL:         reloadURL,
+		reloadAuthUser:    reloadUser,
+		reloadAuthPass:    reloadPass,
+		reloadAuthToken:   reloadToken,
 		recordDeleteAfter: retention,
 		httpClient:        &http.Client{Timeout: 5 * time.Second},
 	}
@@ -263,6 +274,7 @@ func (g *Generator) reloadViaHTTP() error {
 	if err != nil {
 		return fmt.Errorf("create reload request: %w", err)
 	}
+	g.applyReloadAuth(req)
 
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
@@ -274,6 +286,16 @@ func (g *Generator) reloadViaHTTP() error {
 		return fmt.Errorf("reload mediamtx via HTTP: status %s", resp.Status)
 	}
 	return nil
+}
+
+func (g *Generator) applyReloadAuth(req *http.Request) {
+	if g.reloadAuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+g.reloadAuthToken)
+		return
+	}
+	if g.reloadAuthUser != "" || g.reloadAuthPass != "" {
+		req.SetBasicAuth(g.reloadAuthUser, g.reloadAuthPass)
+	}
 }
 
 func parseDurationEnv(key string, def time.Duration) time.Duration {

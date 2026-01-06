@@ -19,3 +19,20 @@ Exemplo de payload (START):
 
 Para aceitar publicações dinâmicas, a configuração do MediaMTX central deve ter
 `pathDefaults` com `source: publisher` (ex.: `infra/mediamtx/central/mediamtx.yml`).
+
+## Reload HTTP do MediaMTX
+
+Para recarregar o MediaMTX via HTTP, configure a URL e as credenciais (se houver):
+
+```bash
+MTX_PROXY_RELOAD_URL="http://mediamtx.local:9997/v3/reload"
+MTX_PROXY_RELOAD_USER="admin"
+MTX_PROXY_RELOAD_PASS="secret"
+```
+
+Ou usando token bearer:
+
+```bash
+MTX_PROXY_RELOAD_URL="http://mediamtx.local:9997/v3/reload"
+MTX_PROXY_RELOAD_TOKEN="seu-token"
+```
