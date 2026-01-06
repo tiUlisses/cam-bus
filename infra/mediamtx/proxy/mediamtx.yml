@@ -6,6 +6,10 @@ hls: no
 webrtc: no
 
 # API para reload de config via cam-bus.
+# Para proteger o endpoint, configure credenciais aqui:
+# - Usuário/senha (versões mais recentes): apiUser / apiPass
+# - Token bearer (dependendo da versão): apiToken (ou equivalente)
+# Se habilitar auth, o cam-bus precisa enviar essas credenciais no reload.
 api: yes
 apiAddress: :9997
 
