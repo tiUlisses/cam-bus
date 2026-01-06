@@ -655,14 +655,18 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 		log.Printf("[uplink] invalid JSON on %s: %v", topic, err)
 		return
 	}
-	if strings.EqualFold(action, "start") {
-		req.CentralPath = uplink.CentralPathFor(core.CameraInfo{
-			Tenant:   tenant,
-			Building: building,
-			DeviceID: devID,
-		})
-	}
 	req.Normalize()
+	if strings.EqualFold(action, "start") && req.CentralPath == "" {
+		if req.ProxyPath != "" {
+			req.CentralPath = strings.Trim(req.ProxyPath, "/")
+		} else {
+			req.CentralPath = uplink.CentralPathFor(core.CameraInfo{
+				Tenant:   tenant,
+				Building: building,
+				DeviceID: devID,
+			})
+		}
+	}
 	if err := req.Validate(); err != nil {
 		log.Printf("[uplink] invalid payload on %s: %v", topic, err)
 		return
