@@ -17,6 +17,7 @@ import (
 	"github.com/sua-org/cam-bus/internal/drivers"
 	"github.com/sua-org/cam-bus/internal/engines"
 	"github.com/sua-org/cam-bus/internal/mqttclient"
+	"github.com/sua-org/cam-bus/internal/uplink"
 )
 
 type Supervisor struct {
@@ -25,6 +26,7 @@ type Supervisor struct {
 
 	shard   string
 	engines *engines.Manager
+	uplink  *uplink.Manager
 
 	mu             sync.Mutex
 	workers        map[string]*cameraWorker
@@ -129,6 +131,7 @@ func New(mqtt *mqttclient.Client, baseTopic string) *Supervisor {
 		baseTopic:      baseTopic,
 		shard:          shard,
 		engines:        eng,
+		uplink:         uplink.NewManagerFromEnv(),
 		workers:        make(map[string]*cameraWorker),
 		statusInterval: statusInterval,
 		proc:           procHandle,
@@ -510,9 +513,14 @@ func (s *Supervisor) publishDiscoveryConfig(component, objectID string, cfg map[
 func (s *Supervisor) Run(ctx context.Context) error {
 	infoTopic := fmt.Sprintf("%s/+/+/+/+/+/info", s.baseTopic) // rtls/cameras/tenant/building/floor/type/id/info
 	log.Printf("[supervisor] subscribing to info topic: %s", infoTopic)
+	uplinkTopic := fmt.Sprintf("%s/+/+/+/+/+/uplink/+", s.baseTopic)
+	log.Printf("[supervisor] subscribing to uplink topic: %s", uplinkTopic)
 
 	if err := s.mqtt.Subscribe(infoTopic, 1, s.handleInfoMessage); err != nil {
 		return fmt.Errorf("subscribe error: %w", err)
+	}
+	if err := s.mqtt.Subscribe(uplinkTopic, 1, s.handleUplinkMessage); err != nil {
+		return fmt.Errorf("subscribe uplink error: %w", err)
 	}
 	if s.statusInterval > 0 {
 		go s.runStatusLoop(ctx)
@@ -609,6 +617,40 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 
 	// Por fim, inicia/atualiza o worker normalmente
 	s.startOrUpdateCamera(info)
+}
+
+func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
+	parts := strings.Split(topic, "/")
+	baseParts := strings.Split(s.baseTopic, "/")
+	if len(parts) < len(baseParts)+7 {
+		log.Printf("[uplink] invalid uplink topic: %s", topic)
+		return
+	}
+	action := parts[len(parts)-1]
+
+	var req uplink.Request
+	if err := json.Unmarshal(payload, &req); err != nil {
+		log.Printf("[uplink] invalid JSON on %s: %v", topic, err)
+		return
+	}
+	req.Normalize()
+	if err := req.Validate(); err != nil {
+		log.Printf("[uplink] invalid payload on %s: %v", topic, err)
+		return
+	}
+
+	switch strings.ToLower(action) {
+	case "start":
+		if err := s.uplink.Start(req); err != nil {
+			log.Printf("[uplink] start failed for %s: %v", req.CameraID, err)
+		}
+	case "stop":
+		if err := s.uplink.Stop(req); err != nil {
+			log.Printf("[uplink] stop failed for %s: %v", req.CameraID, err)
+		}
+	default:
+		log.Printf("[uplink] unknown uplink action: %s", action)
+	}
 }
 
 func (s *Supervisor) keyFor(info core.CameraInfo) string {
@@ -811,11 +853,14 @@ func (s *Supervisor) stopCamera(key string) {
 
 func (s *Supervisor) stopAll() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	for key, w := range s.workers {
 		log.Printf("[supervisor] stopping worker %s", key)
 		w.cancel()
 		delete(s.workers, key)
+	}
+	s.mu.Unlock()
+
+	if s.uplink != nil {
+		s.uplink.StopAll()
 	}
 }
