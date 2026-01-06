@@ -22,7 +22,30 @@ Para aceitar publicações dinâmicas, a configuração do MediaMTX central deve
 
 ## Reload HTTP do MediaMTX
 
-Para recarregar o MediaMTX via HTTP, configure a URL e as credenciais (se houver):
+Para recarregar o MediaMTX via HTTP, configure a URL e as credenciais (se houver).
+Se o MediaMTX estiver com API autenticada, um `401` indica credenciais ausentes
+ou inválidas.
+
+### Habilitar autenticação da API no MediaMTX
+
+No `mediamtx.yml` do proxy (ex.: `infra/mediamtx/proxy/mediamtx.yml`), habilite
+as credenciais conforme a versão do MediaMTX:
+
+```yml
+api: yes
+apiAddress: :9997
+
+# Usuário/senha (versões recentes)
+apiUser: admin
+apiPass: secret
+
+# OU token bearer (dependendo da versão)
+# apiToken: seu-token
+```
+
+### Configurar o .env do cam-bus
+
+Use usuário/senha:
 
 ```bash
 MTX_PROXY_RELOAD_URL="http://mediamtx.local:9997/v3/reload"
