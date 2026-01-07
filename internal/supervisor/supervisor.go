@@ -2,6 +2,7 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -573,6 +574,22 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	devType := parts[offset+3]
 	devID := parts[offset+4]
 	// parts[offset+5] == "info"
+
+	trimmedPayload := bytes.TrimSpace(payload)
+	if len(trimmedPayload) == 0 || bytes.Equal(trimmedPayload, []byte("null")) {
+		info := core.CameraInfo{
+			Tenant:     tenant,
+			Building:   building,
+			Floor:      floor,
+			DeviceType: devType,
+			DeviceID:   devID,
+		}
+		key := s.keyFor(info)
+		log.Printf("[supervisor] camera %s removed via tombstone", key)
+		s.removeCameraInfo(key)
+		s.stopCamera(key)
+		return
+	}
 
 	var info core.CameraInfo
 	if err := json.Unmarshal(payload, &info); err != nil {
