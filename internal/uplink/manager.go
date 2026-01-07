@@ -58,9 +58,9 @@ func NewManagerFromEnv() *Manager {
 
 func (r *Request) Normalize() {
 	r.CameraID = strings.TrimSpace(r.CameraID)
-	r.ProxyPath = strings.TrimSpace(r.ProxyPath)
+	r.ProxyPath = strings.Trim(strings.TrimSpace(r.ProxyPath), "/")
 	r.CentralHost = strings.TrimSpace(r.CentralHost)
-	r.CentralPath = strings.TrimSpace(r.CentralPath)
+	r.CentralPath = strings.Trim(strings.TrimSpace(r.CentralPath), "/")
 }
 
 func (r Request) Validate() error {
@@ -98,6 +98,9 @@ func (m *Manager) StopAll() {
 func (m *Manager) applyDefaults(req Request) Request {
 	if req.ProxyPath == "" {
 		req.ProxyPath = req.CameraID
+	}
+	if req.CentralPath == "" {
+		req.CentralPath = req.ProxyPath
 	}
 	if req.CentralHost == "" {
 		req.CentralHost = m.defaultCentralHost

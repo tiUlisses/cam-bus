@@ -12,4 +12,5 @@ webrtcLocalUDPAddress: :8189
 pathDefaults:
   source: publisher
 
-paths: {}
+paths:
+  all_others: {}
