@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sua-org/cam-bus/internal/core"
 )
 
 const (
@@ -83,6 +85,32 @@ func (m *Manager) Stop(req Request) error {
 	req = m.applyDefaults(req)
 	cameraKey := keyFor(req)
 	return m.stopUplink(cameraKey, "stop command")
+}
+
+func (m *Manager) StopByCamera(info core.CameraInfo) {
+	candidates := make(map[string]struct{})
+	if centralPath := strings.Trim(strings.TrimSpace(info.CentralPath), "/"); centralPath != "" {
+		candidates[centralPath] = struct{}{}
+	}
+	if proxyPath := strings.Trim(strings.TrimSpace(info.ProxyPath), "/"); proxyPath != "" {
+		candidates[proxyPath] = struct{}{}
+	}
+	if cameraID := strings.TrimSpace(info.DeviceID); cameraID != "" {
+		candidates[cameraID] = struct{}{}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for key := range candidates {
+		if proc, ok := m.uplinks[key]; ok {
+			m.stopProcess(proc, "camera cleanup")
+			delete(m.uplinks, key)
+		}
+	}
 }
 
 func (m *Manager) StopAll() {

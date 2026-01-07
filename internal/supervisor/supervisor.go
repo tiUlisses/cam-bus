@@ -587,6 +587,9 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 		key := s.keyFor(info)
 		log.Printf("[supervisor] camera %s removed via tombstone", key)
 		s.removeCameraInfo(key)
+		if s.uplink != nil {
+			s.uplink.StopByCamera(info)
+		}
 		s.stopCamera(key)
 		return
 	}
@@ -639,6 +642,9 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	if !info.Enabled {
 		log.Printf("[supervisor] camera %s disabled via info topic, stopping worker", key)
 		s.removeCameraInfo(key)
+		if s.uplink != nil {
+			s.uplink.StopByCamera(info)
+		}
 		s.stopCamera(key)
 		return
 	}
