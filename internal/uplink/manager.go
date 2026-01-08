@@ -37,6 +37,9 @@ type uplinkProcess struct {
 	cancel    context.CancelFunc
 	cmd       *exec.Cmd
 	ttlTimer  *time.Timer
+	// startCount increments for every Start request; stopCount increments for every Stop request.
+	startCount int
+	stopCount  int
 }
 
 type Request struct {
@@ -168,7 +171,8 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 
 	if existing, ok := m.uplinks[cameraKey]; ok {
 		if sameRequest(existing.payload, req) {
-			log.Printf("[uplink] already running for %s, refreshing TTL", cameraKey)
+			existing.startCount++
+			log.Printf("[uplink] already running for %s, startCount=%d stopCount=%d, refreshing TTL", cameraKey, existing.startCount, existing.stopCount)
 			m.refreshTTL(existing, req.TTLSeconds)
 			return nil
 		}
@@ -199,6 +203,8 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 		payload:   req,
 		cancel:    cancel,
 		cmd:       cmd,
+		startCount: 1,
+		stopCount:  0,
 	}
 	m.uplinks[cameraKey] = proc
 	m.refreshTTL(proc, req.TTLSeconds)
@@ -217,7 +223,7 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 		m.mu.Unlock()
 	}()
 
-	log.Printf("[uplink] started for %s -> %s", cameraKey, srtURL)
+	log.Printf("[uplink] started for %s -> %s (startCount=%d stopCount=%d)", cameraKey, srtURL, proc.startCount, proc.stopCount)
 	return nil
 }
 
@@ -229,8 +235,13 @@ func (m *Manager) stopUplink(cameraKey, reason string) error {
 	if !ok {
 		return fmt.Errorf("uplink not running")
 	}
-	m.stopProcess(proc, reason)
-	delete(m.uplinks, cameraKey)
+	proc.stopCount++
+	if proc.stopCount >= proc.startCount {
+		m.stopProcess(proc, reason)
+		delete(m.uplinks, cameraKey)
+		return nil
+	}
+	log.Printf("[uplink] stop requested for %s: %s (startCount=%d stopCount=%d), keeping uplink active", proc.cameraKey, reason, proc.startCount, proc.stopCount)
 	return nil
 }
 
@@ -238,7 +249,7 @@ func (m *Manager) stopProcess(proc *uplinkProcess, reason string) {
 	if proc.ttlTimer != nil {
 		proc.ttlTimer.Stop()
 	}
-	log.Printf("[uplink] stopping %s: %s", proc.cameraKey, reason)
+	log.Printf("[uplink] stopping %s: %s (startCount=%d stopCount=%d)", proc.cameraKey, reason, proc.startCount, proc.stopCount)
 	proc.cancel()
 }
 
@@ -250,6 +261,7 @@ func (m *Manager) refreshTTL(proc *uplinkProcess, ttlSeconds int) {
 	if ttlSeconds <= 0 {
 		return
 	}
+	log.Printf("[uplink] refreshing ttl for %s (ttlSeconds=%d startCount=%d stopCount=%d)", proc.cameraKey, ttlSeconds, proc.startCount, proc.stopCount)
 	proc.ttlTimer = time.AfterFunc(time.Duration(ttlSeconds)*time.Second, func() {
 		if err := m.stopUplink(proc.cameraKey, "ttl expired"); err != nil {
 			log.Printf("[uplink] ttl stop failed for %s: %v", proc.cameraKey, err)
