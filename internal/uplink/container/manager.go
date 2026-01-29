@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -57,18 +58,16 @@ func (m *Manager) Start(ctx context.Context, req Request) (string, error) {
 	if req.SRTURL == "" {
 		return "", fmt.Errorf("srt url required")
 	}
+	if err := validateRequest(req); err != nil {
+		return "", err
+	}
 	if err := m.ensureImage(ctx); err != nil {
 		return "", fmt.Errorf("ensure docker image: %w", err)
 	}
 	_, _ = m.run(ctx, "rm", "-f", req.Name)
-	runOut, err := m.run(ctx, "run", "-d", "--name", req.Name, "--network", "host",
-		m.image, "ffmpeg",
-		"-rtsp_transport", "tcp",
-		"-i", req.ProxyURL,
-		"-c", "copy",
-		"-f", "mpegts",
-		req.SRTURL,
-	)
+	ffmpegArgs := buildFFmpegArgs(req)
+	runArgs := append([]string{"run", "-d", "--name", req.Name, "--network", "host", m.image}, ffmpegArgs...)
+	runOut, err := m.run(ctx, runArgs...)
 	if err != nil {
 		return "", fmt.Errorf("start docker container: %w", err)
 	}
@@ -93,6 +92,40 @@ func (m *Manager) Start(ctx context.Context, req Request) (string, error) {
 		return "", fmt.Errorf("container %s not running (status=%s exitCode=%s stateError=%s logs=%s)", containerID, status, exitCode, strings.TrimSpace(stateErr), logsSnippet)
 	}
 	return containerID, nil
+}
+
+func buildFFmpegArgs(req Request) []string {
+	return []string{
+		"-rtsp_transport", "tcp",
+		"-i", req.ProxyURL,
+		"-c", "copy",
+		"-f", "mpegts",
+		req.SRTURL,
+	}
+}
+
+func validateRequest(req Request) error {
+	if err := validateURLScheme(req.ProxyURL, "rtsp"); err != nil {
+		return fmt.Errorf("proxy url invalid: %w", err)
+	}
+	if err := validateURLScheme(req.SRTURL, "srt"); err != nil {
+		return fmt.Errorf("srt url invalid: %w", err)
+	}
+	return nil
+}
+
+func validateURLScheme(rawURL, scheme string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	if strings.ToLower(parsed.Scheme) != scheme {
+		return fmt.Errorf("expected scheme %q, got %q", scheme, parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("missing host")
+	}
+	return nil
 }
 
 func (m *Manager) InspectStatus(ctx context.Context, name string) (Status, error) {
