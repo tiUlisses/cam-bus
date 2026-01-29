@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sua-org/cam-bus/internal/core"
@@ -31,6 +32,7 @@ type Manager struct {
 	reconcileStop      chan struct{}
 	mu                 sync.Mutex
 	uplinks            map[string]*uplinkProcess
+	statusHook         atomic.Value
 }
 
 type uplinkProcess struct {
@@ -66,6 +68,10 @@ func NewManagerFromEnv() *Manager {
 	}
 	manager.startReconciler()
 	return manager
+}
+
+func (m *Manager) SetStatusHook(h StatusHook) {
+	m.statusHook.Store(h)
 }
 
 func (r *Request) Normalize() {
@@ -196,6 +202,15 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 		SRTURL:   srtURL,
 	})
 	if err != nil {
+		log.Printf("[uplink] docker run failed for %s (container=%s): %v", cameraKey, containerName, err)
+		m.notifyStatus(Status{
+			CameraID:      req.CameraID,
+			CentralPath:   req.CentralPath,
+			ContainerName: containerName,
+			State:         "error",
+			ExitCode:      0,
+			Error:         err.Error(),
+		})
 		return fmt.Errorf("start container uplink: %w", err)
 	}
 
@@ -212,6 +227,14 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	m.refreshTTL(proc, req.TTLSeconds)
 
 	log.Printf("[uplink] started for %s -> %s (startCount=%d stopCount=%d)", cameraKey, srtURL, proc.startCount, proc.stopCount)
+	m.notifyStatus(Status{
+		CameraID:      req.CameraID,
+		CentralPath:   req.CentralPath,
+		ContainerName: containerName,
+		State:         "running",
+		ExitCode:      0,
+		Error:         "",
+	})
 	return nil
 }
 
@@ -236,6 +259,8 @@ func (m *Manager) startReconciler() {
 
 type uplinkSnapshot struct {
 	cameraKey   string
+	cameraID    string
+	centralPath string
 	container   string
 	containerID string
 }
@@ -248,6 +273,8 @@ func (m *Manager) snapshotUplinks() []uplinkSnapshot {
 	for _, proc := range m.uplinks {
 		snapshots = append(snapshots, uplinkSnapshot{
 			cameraKey:   proc.cameraKey,
+			cameraID:    proc.payload.CameraID,
+			centralPath: proc.payload.CentralPath,
 			container:   proc.container,
 			containerID: proc.containerID,
 		})
@@ -270,6 +297,14 @@ func (m *Manager) reconcileOnce() {
 		}
 		stateErr := strings.TrimSpace(status.Error)
 		log.Printf("[uplink] reconcile status for %s container=%s state=%s exitCode=%d stateError=%s", snap.cameraKey, snap.container, status.State, status.ExitCode, stateErr)
+		m.notifyStatus(Status{
+			CameraID:      snap.cameraID,
+			CentralPath:   snap.centralPath,
+			ContainerName: snap.container,
+			State:         status.State,
+			ExitCode:      status.ExitCode,
+			Error:         stateErr,
+		})
 		if status.State == "running" {
 			m.mu.Lock()
 			if proc, ok := m.uplinks[snap.cameraKey]; ok && proc.container == snap.container {
@@ -315,7 +350,38 @@ func (m *Manager) stopProcess(proc *uplinkProcess, reason string) {
 	stopCtx := context.Background()
 	if err := m.containerManager.Stop(stopCtx, proc.container); err != nil {
 		log.Printf("[uplink] stopProcess failed for %s: %v", proc.cameraKey, err)
+		m.notifyStatus(Status{
+			CameraID:      proc.payload.CameraID,
+			CentralPath:   proc.payload.CentralPath,
+			ContainerName: proc.container,
+			State:         "error",
+			ExitCode:      0,
+			Error:         err.Error(),
+		})
+		return
 	}
+	m.notifyStatus(Status{
+		CameraID:      proc.payload.CameraID,
+		CentralPath:   proc.payload.CentralPath,
+		ContainerName: proc.container,
+		State:         "stopped",
+		ExitCode:      0,
+		Error:         reason,
+	})
+}
+
+func (m *Manager) notifyStatus(status Status) {
+	if status.Timestamp.IsZero() {
+		status.Timestamp = time.Now().UTC()
+	} else {
+		status.Timestamp = status.Timestamp.UTC()
+	}
+	hookValue := m.statusHook.Load()
+	hook, ok := hookValue.(StatusHook)
+	if !ok || hook == nil {
+		return
+	}
+	hook(status)
 }
 
 func (m *Manager) refreshTTL(proc *uplinkProcess, ttlSeconds int) {
