@@ -19,6 +19,7 @@ var invalidNameChars = regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
 type Manager struct {
 	dockerBin string
 	image     string
+	configDir string
 }
 
 type Request struct {
@@ -31,6 +32,7 @@ func NewManagerFromEnv() *Manager {
 	return &Manager{
 		dockerBin: getenv("UPLINK_DOCKER_BIN", defaultDockerBin),
 		image:     getenv("UPLINK_DOCKER_IMAGE", defaultDockerImage),
+		configDir: getenv("UPLINK_DOCKER_CONFIG", ""),
 	}
 }
 
@@ -81,12 +83,37 @@ func NameForCentralPath(path string) string {
 }
 
 func (m *Manager) run(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, m.dockerBin, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	out, err := m.runWithEnv(ctx, args, nil)
+	if err != nil && m.configDir == "" && strings.Contains(out, "error getting credentials") {
+		fallbackDir := "/tmp/cam-bus-docker-config"
+		if mkErr := os.MkdirAll(fallbackDir, 0o700); mkErr == nil {
+			fallbackEnv := []string{"DOCKER_CONFIG=" + fallbackDir}
+			fallbackOut, fallbackErr := m.runWithEnv(ctx, args, fallbackEnv)
+			if fallbackErr == nil {
+				return fallbackOut, nil
+			}
+		}
 	}
-	return string(out), nil
+	if err != nil {
+		return out, fmt.Errorf("%w: %s", err, strings.TrimSpace(out))
+	}
+	return out, nil
+}
+
+func (m *Manager) runWithEnv(ctx context.Context, args []string, extraEnv []string) (string, error) {
+	cmd := exec.CommandContext(ctx, m.dockerBin, args...)
+	if m.configDir != "" {
+		extraEnv = append(extraEnv, "DOCKER_CONFIG="+m.configDir)
+	}
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+	if err != nil {
+		return output, err
+	}
+	return output, nil
 }
 
 func getenv(key, def string) string {
