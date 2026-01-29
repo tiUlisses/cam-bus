@@ -420,7 +420,7 @@ func buildSRTURL(host string, port int, path string) string {
 		port = defaultSRTPort
 	}
 	streamID := fmt.Sprintf("publish:%s", path)
-	query := fmt.Sprintf("streamid=%s&pkt_size=%d", streamID, defaultSRTPacketSize)
+	query := fmt.Sprintf("streamid=%s&pkt_size=%d&mode=caller&transtype=live", streamID, defaultSRTPacketSize)
 
 	u := url.URL{
 		Scheme:   "srt",

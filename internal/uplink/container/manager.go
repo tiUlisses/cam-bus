@@ -18,12 +18,32 @@ const (
 
 var invalidNameChars = regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
 
+var (
+	defaultFFmpegGlobalArgs = []string{
+		"-hide_banner",
+	}
+	defaultFFmpegInputArgs = []string{
+		"-rtsp_transport", "tcp",
+		"-rw_timeout", "15000000",
+	}
+	defaultFFmpegOutputArgs = []string{
+		"-c", "copy",
+		"-f", "mpegts",
+		"-mpegts_flags", "+resend_headers",
+		"-muxdelay", "0",
+		"-muxpreload", "0",
+	}
+)
+
 type Manager struct {
-	dockerBin    string
-	image        string
-	configDir    string
-	buildContext string
-	dockerfile   string
+	dockerBin        string
+	image            string
+	configDir        string
+	buildContext     string
+	dockerfile       string
+	ffmpegGlobalArgs []string
+	ffmpegInputArgs  []string
+	ffmpegOutputArgs []string
 }
 
 type Status struct {
@@ -40,11 +60,14 @@ type Request struct {
 
 func NewManagerFromEnv() *Manager {
 	return &Manager{
-		dockerBin:    getenv("UPLINK_DOCKER_BIN", defaultDockerBin),
-		image:        getenv("UPLINK_DOCKER_IMAGE", defaultDockerImage),
-		configDir:    getenv("UPLINK_DOCKER_CONFIG", ""),
-		buildContext: os.Getenv("UPLINK_DOCKER_BUILD_CONTEXT"),
-		dockerfile:   os.Getenv("UPLINK_DOCKERFILE"),
+		dockerBin:        getenv("UPLINK_DOCKER_BIN", defaultDockerBin),
+		image:            getenv("UPLINK_DOCKER_IMAGE", defaultDockerImage),
+		configDir:        getenv("UPLINK_DOCKER_CONFIG", ""),
+		buildContext:     os.Getenv("UPLINK_DOCKER_BUILD_CONTEXT"),
+		dockerfile:       os.Getenv("UPLINK_DOCKERFILE"),
+		ffmpegGlobalArgs: parseArgsEnv("UPLINK_FFMPEG_GLOBAL_ARGS", defaultFFmpegGlobalArgs),
+		ffmpegInputArgs:  parseArgsEnv("UPLINK_FFMPEG_INPUT_ARGS", defaultFFmpegInputArgs),
+		ffmpegOutputArgs: parseArgsEnv("UPLINK_FFMPEG_OUTPUT_ARGS", defaultFFmpegOutputArgs),
 	}
 }
 
@@ -65,7 +88,7 @@ func (m *Manager) Start(ctx context.Context, req Request) (string, error) {
 		return "", fmt.Errorf("ensure docker image: %w", err)
 	}
 	_, _ = m.run(ctx, "rm", "-f", req.Name)
-	ffmpegArgs := buildFFmpegArgs(req)
+	ffmpegArgs := m.buildFFmpegArgs(req)
 	runArgs := append([]string{"run", "-d", "--name", req.Name, "--network", "host", m.image}, ffmpegArgs...)
 	runOut, err := m.run(ctx, runArgs...)
 	if err != nil {
@@ -94,14 +117,14 @@ func (m *Manager) Start(ctx context.Context, req Request) (string, error) {
 	return containerID, nil
 }
 
-func buildFFmpegArgs(req Request) []string {
-	return []string{
-		"-rtsp_transport", "tcp",
-		"-i", req.ProxyURL,
-		"-c", "copy",
-		"-f", "mpegts",
-		req.SRTURL,
-	}
+func (m *Manager) buildFFmpegArgs(req Request) []string {
+	args := make([]string, 0, len(m.ffmpegGlobalArgs)+len(m.ffmpegInputArgs)+len(m.ffmpegOutputArgs)+4)
+	args = append(args, m.ffmpegGlobalArgs...)
+	args = append(args, m.ffmpegInputArgs...)
+	args = append(args, "-i", req.ProxyURL)
+	args = append(args, m.ffmpegOutputArgs...)
+	args = append(args, req.SRTURL)
+	return args
 }
 
 func validateRequest(req Request) error {
@@ -239,6 +262,13 @@ func (m *Manager) runWithEnv(ctx context.Context, args []string, extraEnv []stri
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func parseArgsEnv(key string, def []string) []string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return strings.Fields(v)
 	}
 	return def
 }
