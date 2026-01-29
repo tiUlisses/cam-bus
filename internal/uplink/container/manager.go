@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
@@ -17,9 +18,11 @@ const (
 var invalidNameChars = regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
 
 type Manager struct {
-	dockerBin string
-	image     string
-	configDir string
+	dockerBin    string
+	image        string
+	configDir    string
+	buildContext string
+	dockerfile   string
 }
 
 type Request struct {
@@ -30,9 +33,11 @@ type Request struct {
 
 func NewManagerFromEnv() *Manager {
 	return &Manager{
-		dockerBin: getenv("UPLINK_DOCKER_BIN", defaultDockerBin),
-		image:     getenv("UPLINK_DOCKER_IMAGE", defaultDockerImage),
-		configDir: getenv("UPLINK_DOCKER_CONFIG", ""),
+		dockerBin:    getenv("UPLINK_DOCKER_BIN", defaultDockerBin),
+		image:        getenv("UPLINK_DOCKER_IMAGE", defaultDockerImage),
+		configDir:    getenv("UPLINK_DOCKER_CONFIG", ""),
+		buildContext: os.Getenv("UPLINK_DOCKER_BUILD_CONTEXT"),
+		dockerfile:   os.Getenv("UPLINK_DOCKERFILE"),
 	}
 }
 
@@ -46,6 +51,9 @@ func (m *Manager) Start(ctx context.Context, req Request) error {
 	if req.SRTURL == "" {
 		return fmt.Errorf("srt url required")
 	}
+	if err := m.ensureImage(ctx); err != nil {
+		return fmt.Errorf("ensure docker image: %w", err)
+	}
 	_, _ = m.run(ctx, "rm", "-f", req.Name)
 	_, err := m.run(ctx, "run", "-d", "--name", req.Name, "--network", "host",
 		m.image, "ffmpeg",
@@ -58,6 +66,36 @@ func (m *Manager) Start(ctx context.Context, req Request) error {
 	if err != nil {
 		return fmt.Errorf("start docker container: %w", err)
 	}
+	return nil
+}
+
+func (m *Manager) ensureImage(ctx context.Context) error {
+	_, err := m.runWithEnv(ctx, []string{"image", "inspect", m.image}, nil)
+	if err == nil {
+		return nil
+	}
+	if m.buildContext == "" && m.dockerfile == "" {
+		log.Printf("docker image not found; pulling %q", m.image)
+		if _, pullErr := m.run(ctx, "pull", m.image); pullErr != nil {
+			return fmt.Errorf("pull docker image %q: %w", m.image, pullErr)
+		}
+		log.Printf("docker image ready via pull: %q", m.image)
+		return nil
+	}
+	buildContext := m.buildContext
+	if buildContext == "" {
+		buildContext = "."
+	}
+	args := []string{"build", "-t", m.image}
+	if m.dockerfile != "" {
+		args = append(args, "-f", m.dockerfile)
+	}
+	args = append(args, buildContext)
+	log.Printf("docker image not found; building %q with context %q", m.image, buildContext)
+	if _, buildErr := m.run(ctx, args...); buildErr != nil {
+		return fmt.Errorf("build docker image %q: %w", m.image, buildErr)
+	}
+	log.Printf("docker image ready via build: %q", m.image)
 	return nil
 }
 
