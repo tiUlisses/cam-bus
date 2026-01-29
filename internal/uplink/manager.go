@@ -19,6 +19,7 @@ const (
 	defaultProxyRTSPBase = "rtsp://localhost:8554"
 	defaultSRTPacketSize = 1316
 	defaultSRTPort       = 8890
+	defaultReconcileSecs = 15
 )
 
 type Manager struct {
@@ -26,6 +27,8 @@ type Manager struct {
 	defaultCentralHost string
 	defaultSRTPort     int
 	containerManager   *container.Manager
+	reconcileInterval  time.Duration
+	reconcileStop      chan struct{}
 	mu                 sync.Mutex
 	uplinks            map[string]*uplinkProcess
 }
@@ -52,13 +55,17 @@ type Request struct {
 }
 
 func NewManagerFromEnv() *Manager {
-	return &Manager{
+	manager := &Manager{
 		proxyRTSPBase:      strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/"),
 		defaultCentralHost: strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST")),
 		defaultSRTPort:     getenvInt("UPLINK_CENTRAL_SRT_PORT", defaultSRTPort),
 		containerManager:   container.NewManagerFromEnv(),
+		reconcileInterval:  time.Duration(getenvInt("UPLINK_RECONCILE_INTERVAL_SECONDS", defaultReconcileSecs)) * time.Second,
+		reconcileStop:      make(chan struct{}),
 		uplinks:            make(map[string]*uplinkProcess),
 	}
+	manager.startReconciler()
+	return manager
 }
 
 func (r *Request) Normalize() {
@@ -206,6 +213,80 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 
 	log.Printf("[uplink] started for %s -> %s (startCount=%d stopCount=%d)", cameraKey, srtURL, proc.startCount, proc.stopCount)
 	return nil
+}
+
+func (m *Manager) startReconciler() {
+	if m.reconcileInterval <= 0 {
+		return
+	}
+	log.Printf("[uplink] reconcile loop started (interval=%s)", m.reconcileInterval)
+	go func() {
+		ticker := time.NewTicker(m.reconcileInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				m.reconcileOnce()
+			case <-m.reconcileStop:
+				return
+			}
+		}
+	}()
+}
+
+type uplinkSnapshot struct {
+	cameraKey   string
+	container   string
+	containerID string
+}
+
+func (m *Manager) snapshotUplinks() []uplinkSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	snapshots := make([]uplinkSnapshot, 0, len(m.uplinks))
+	for _, proc := range m.uplinks {
+		snapshots = append(snapshots, uplinkSnapshot{
+			cameraKey:   proc.cameraKey,
+			container:   proc.container,
+			containerID: proc.containerID,
+		})
+	}
+	return snapshots
+}
+
+func (m *Manager) reconcileOnce() {
+	snapshots := m.snapshotUplinks()
+	if len(snapshots) == 0 {
+		return
+	}
+	for _, snap := range snapshots {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		status, err := m.containerManager.InspectStatus(ctx, snap.container)
+		cancel()
+		if err != nil {
+			log.Printf("[uplink] reconcile inspect failed for %s (container=%s): %v", snap.cameraKey, snap.container, err)
+			continue
+		}
+		stateErr := strings.TrimSpace(status.Error)
+		log.Printf("[uplink] reconcile status for %s container=%s state=%s exitCode=%d stateError=%s", snap.cameraKey, snap.container, status.State, status.ExitCode, stateErr)
+		if status.State == "running" {
+			m.mu.Lock()
+			if proc, ok := m.uplinks[snap.cameraKey]; ok && proc.container == snap.container {
+				proc.containerStatus = status.State
+			}
+			m.mu.Unlock()
+			continue
+		}
+		m.mu.Lock()
+		proc, ok := m.uplinks[snap.cameraKey]
+		if ok && proc.container == snap.container {
+			proc.containerStatus = status.State
+			m.stopProcess(proc, fmt.Sprintf("container state=%s exitCode=%d stateError=%s", status.State, status.ExitCode, stateErr))
+			delete(m.uplinks, snap.cameraKey)
+		}
+		m.mu.Unlock()
+	}
 }
 
 func (m *Manager) stopUplink(cameraKey, reason string) error {

@@ -25,6 +25,12 @@ type Manager struct {
 	dockerfile   string
 }
 
+type Status struct {
+	State    string
+	ExitCode int
+	Error    string
+}
+
 type Request struct {
 	Name     string
 	ProxyURL string
@@ -87,6 +93,29 @@ func (m *Manager) Start(ctx context.Context, req Request) (string, error) {
 		return "", fmt.Errorf("container %s not running (status=%s exitCode=%s stateError=%s logs=%s)", containerID, status, exitCode, strings.TrimSpace(stateErr), logsSnippet)
 	}
 	return containerID, nil
+}
+
+func (m *Manager) InspectStatus(ctx context.Context, name string) (Status, error) {
+	if name == "" {
+		return Status{}, fmt.Errorf("container name required")
+	}
+	inspectOut, err := m.run(ctx, "inspect", "--format", "{{.State.Status}}|{{.State.ExitCode}}|{{.State.Error}}", name)
+	if err != nil {
+		return Status{}, fmt.Errorf("inspect docker container %s: %w", name, err)
+	}
+	inspectParts := strings.SplitN(strings.TrimSpace(inspectOut), "|", 3)
+	if len(inspectParts) != 3 {
+		return Status{}, fmt.Errorf("inspect docker container %s: unexpected output %q", name, strings.TrimSpace(inspectOut))
+	}
+	exitCode := 0
+	if _, parseErr := fmt.Sscanf(inspectParts[1], "%d", &exitCode); parseErr != nil {
+		return Status{}, fmt.Errorf("inspect docker container %s: invalid exit code %q", name, inspectParts[1])
+	}
+	return Status{
+		State:    inspectParts[0],
+		ExitCode: exitCode,
+		Error:    inspectParts[2],
+	}, nil
 }
 
 func (m *Manager) ensureImage(ctx context.Context) error {
