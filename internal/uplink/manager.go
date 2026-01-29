@@ -7,26 +7,25 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sua-org/cam-bus/internal/core"
+	"github.com/sua-org/cam-bus/internal/uplink/container"
 )
 
 const (
 	defaultProxyRTSPBase = "rtsp://localhost:8554"
-	defaultFFmpegBin     = "ffmpeg"
 	defaultSRTPacketSize = 1316
 	defaultSRTPort       = 8890
 )
 
 type Manager struct {
-	ffmpegBin          string
 	proxyRTSPBase      string
 	defaultCentralHost string
 	defaultSRTPort     int
+	containerManager   *container.Manager
 	mu                 sync.Mutex
 	uplinks            map[string]*uplinkProcess
 }
@@ -34,8 +33,7 @@ type Manager struct {
 type uplinkProcess struct {
 	cameraKey string
 	payload   Request
-	cancel    context.CancelFunc
-	cmd       *exec.Cmd
+	container string
 	ttlTimer  *time.Timer
 	// startCount increments for every Start request; stopCount increments for every Stop request.
 	startCount int
@@ -53,10 +51,10 @@ type Request struct {
 
 func NewManagerFromEnv() *Manager {
 	return &Manager{
-		ffmpegBin:          getenv("UPLINK_FFMPEG_BIN", defaultFFmpegBin),
 		proxyRTSPBase:      strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/"),
 		defaultCentralHost: strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST")),
 		defaultSRTPort:     getenvInt("UPLINK_CENTRAL_SRT_PORT", defaultSRTPort),
+		containerManager:   container.NewManagerFromEnv(),
 		uplinks:            make(map[string]*uplinkProcess),
 	}
 }
@@ -181,47 +179,25 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 
 	proxyURL := fmt.Sprintf("%s/%s", m.proxyRTSPBase, strings.TrimPrefix(req.ProxyPath, "/"))
 	srtURL := buildSRTURL(req.CentralHost, req.CentralSRTPort, req.CentralPath)
-
-	cmdCtx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(cmdCtx, m.ffmpegBin,
-		"-rtsp_transport", "tcp",
-		"-i", proxyURL,
-		"-c", "copy",
-		"-f", "mpegts",
-		srtURL,
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return fmt.Errorf("start ffmpeg: %w", err)
+	containerName := container.NameForCentralPath(req.CentralPath)
+	startCtx := context.Background()
+	if err := m.containerManager.Start(startCtx, container.Request{
+		Name:     containerName,
+		ProxyURL: proxyURL,
+		SRTURL:   srtURL,
+	}); err != nil {
+		return fmt.Errorf("start container uplink: %w", err)
 	}
 
 	proc := &uplinkProcess{
-		cameraKey: cameraKey,
-		payload:   req,
-		cancel:    cancel,
-		cmd:       cmd,
+		cameraKey:  cameraKey,
+		payload:    req,
+		container:  containerName,
 		startCount: 1,
 		stopCount:  0,
 	}
 	m.uplinks[cameraKey] = proc
 	m.refreshTTL(proc, req.TTLSeconds)
-
-	go func() {
-		err := cmd.Wait()
-		if err != nil {
-			log.Printf("[uplink] ffmpeg exited for %s: %v", cameraKey, err)
-		} else {
-			log.Printf("[uplink] ffmpeg exited for %s", cameraKey)
-		}
-		m.mu.Lock()
-		if current, ok := m.uplinks[cameraKey]; ok && current == proc {
-			delete(m.uplinks, cameraKey)
-		}
-		m.mu.Unlock()
-	}()
 
 	log.Printf("[uplink] started for %s -> %s (startCount=%d stopCount=%d)", cameraKey, srtURL, proc.startCount, proc.stopCount)
 	return nil
@@ -250,7 +226,10 @@ func (m *Manager) stopProcess(proc *uplinkProcess, reason string) {
 		proc.ttlTimer.Stop()
 	}
 	log.Printf("[uplink] stopping %s: %s (startCount=%d stopCount=%d)", proc.cameraKey, reason, proc.startCount, proc.stopCount)
-	proc.cancel()
+	stopCtx := context.Background()
+	if err := m.containerManager.Stop(stopCtx, proc.container); err != nil {
+		log.Printf("[uplink] stopProcess failed for %s: %v", proc.cameraKey, err)
+	}
 }
 
 func (m *Manager) refreshTTL(proc *uplinkProcess, ttlSeconds int) {
