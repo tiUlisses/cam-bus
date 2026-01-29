@@ -124,24 +124,29 @@ func New(mqtt *mqttclient.Client, baseTopic string) *Supervisor {
 	}
 
 	eng := engines.LoadFromEnv()
+	uplinkManager := uplink.NewManagerFromEnv()
 	statusInterval := envDurationSeconds("CAMBUS_STATUS_INTERVAL_SECONDS", 30*time.Second)
 	var procHandle *process.Process
 	if p, err := process.NewProcess(int32(os.Getpid())); err == nil {
 		procHandle = p
 	}
 
-	return &Supervisor{
+	supervisor := &Supervisor{
 		mqtt:           mqtt,
 		baseTopic:      baseTopic,
 		shard:          shard,
 		engines:        eng,
-		uplink:         uplink.NewManagerFromEnv(),
+		uplink:         uplinkManager,
 		mtxGen:         mediamtx.NewGeneratorFromEnv(),
 		cameras:        make(map[string]core.CameraInfo),
 		workers:        make(map[string]*cameraWorker),
 		statusInterval: statusInterval,
 		proc:           procHandle,
 	}
+	if supervisor.uplink != nil {
+		supervisor.uplink.SetStatusHook(supervisor.handleUplinkStatus)
+	}
+	return supervisor
 }
 
 func envDurationSeconds(key string, def time.Duration) time.Duration {
@@ -720,6 +725,51 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 	default:
 		log.Printf("[uplink] unknown uplink action: %s", action)
 	}
+}
+
+func (s *Supervisor) handleUplinkStatus(status uplink.Status) {
+	info, ok := s.findCameraInfoForUplinkStatus(status)
+	if !ok {
+		log.Printf("[uplink] status without camera info (cameraId=%s centralPath=%s container=%s state=%s)",
+			status.CameraID, status.CentralPath, status.ContainerName, status.State)
+		return
+	}
+	topic := s.uplinkStatusTopic(info)
+	payload, err := json.Marshal(status)
+	if err != nil {
+		log.Printf("[uplink] status marshal failed for %s: %v", topic, err)
+		return
+	}
+	if err := s.mqtt.Publish(topic, 1, false, payload); err != nil {
+		log.Printf("[uplink] status publish failed for %s: %v", topic, err)
+	}
+}
+
+func (s *Supervisor) findCameraInfoForUplinkStatus(status uplink.Status) (core.CameraInfo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	normalizedCentral := strings.Trim(strings.TrimSpace(status.CentralPath), "/")
+	for _, info := range s.cameras {
+		if status.CameraID != "" && strings.EqualFold(info.DeviceID, status.CameraID) {
+			return info, true
+		}
+		if normalizedCentral != "" && strings.Trim(strings.TrimSpace(info.CentralPath), "/") == normalizedCentral {
+			return info, true
+		}
+	}
+	return core.CameraInfo{}, false
+}
+
+func (s *Supervisor) uplinkStatusTopic(info core.CameraInfo) string {
+	return fmt.Sprintf("%s/%s/%s/%s/%s/%s/uplink/status",
+		s.baseTopic,
+		info.Tenant,
+		info.Building,
+		info.Floor,
+		info.DeviceType,
+		info.DeviceID,
+	)
 }
 
 func (s *Supervisor) keyFor(info core.CameraInfo) string {
