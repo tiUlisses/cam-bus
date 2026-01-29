@@ -44,7 +44,7 @@ func (m *Manager) Start(ctx context.Context, req Request) error {
 	if req.SRTURL == "" {
 		return fmt.Errorf("srt url required")
 	}
-	_ = m.run(ctx, "rm", "-f", req.Name)
+	_, _ = m.run(ctx, "rm", "-f", req.Name)
 	_, err := m.run(ctx, "run", "-d", "--name", req.Name, "--network", "host",
 		m.image, "ffmpeg",
 		"-rtsp_transport", "tcp",
