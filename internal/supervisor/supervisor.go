@@ -588,11 +588,7 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 		}
 		key := s.keyFor(info)
 		log.Printf("[supervisor] camera %s removed via tombstone", key)
-		s.removeCameraInfo(key)
-		if s.uplink != nil {
-			s.uplink.StopByCamera(info)
-		}
-		s.stopCamera(key)
+		s.cleanupCamera(info)
 		return
 	}
 
@@ -644,11 +640,7 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	// Se a câmera estiver desabilitada, para worker
 	if !info.Enabled {
 		log.Printf("[supervisor] camera %s disabled via info topic, stopping worker", key)
-		s.removeCameraInfo(key)
-		if s.uplink != nil {
-			s.uplink.StopByCamera(info)
-		}
-		s.stopCamera(key)
+		s.cleanupCamera(info)
 		return
 	}
 
@@ -927,13 +919,7 @@ func (s *Supervisor) collectorStatusTopic(tenant, building string) string {
 
 func (s *Supervisor) stopCamera(key string) {
 	s.mu.Lock()
-	shouldRefresh := false
-	defer func() {
-		s.mu.Unlock()
-		if shouldRefresh {
-			go s.refreshMediaMTXConfig()
-		}
-	}()
+	defer s.mu.Unlock()
 
 	w, ok := s.workers[key]
 	if !ok {
@@ -943,21 +929,33 @@ func (s *Supervisor) stopCamera(key string) {
 	log.Printf("[supervisor] stopping camera worker %s", key)
 	w.cancel()
 	delete(s.workers, key)
-	shouldRefresh = true
 }
 
 func (s *Supervisor) stopAll() {
 	s.mu.Lock()
+	infosByKey := make(map[string]core.CameraInfo, len(s.cameras)+len(s.workers))
+	for key, info := range s.cameras {
+		infosByKey[key] = info
+	}
 	for key, w := range s.workers {
-		log.Printf("[supervisor] stopping worker %s", key)
-		w.cancel()
-		delete(s.workers, key)
+		infosByKey[key] = w.info
 	}
 	s.mu.Unlock()
 
-	if s.uplink != nil {
-		s.uplink.StopAll()
+	for _, info := range infosByKey {
+		s.cleanupCamera(info)
 	}
+}
+
+func (s *Supervisor) cleanupCamera(info core.CameraInfo) {
+	key := s.keyFor(info)
+	log.Printf("[supervisor] cleanup camera %s (handleInfoMessage/stopAll)", key)
+	s.stopCamera(key)
+	s.removeCameraInfo(key)
+	if s.uplink != nil {
+		s.uplink.StopByCamera(info)
+	}
+	s.refreshMediaMTXConfig()
 }
 
 func (s *Supervisor) refreshMediaMTXConfig() {
