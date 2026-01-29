@@ -17,6 +17,8 @@ type CameraInfo struct {
 
 	RTSPURL                string `json:"rtsp_url,omitempty"`
 	ProxyPath              string `json:"proxy_path,omitempty"`
+	CentralHost            string `json:"central_host,omitempty"`
+	CentralSRTPort         int    `json:"central_srt_port,omitempty"`
 	CentralPath            string `json:"central_path,omitempty"`
 	RecordEnabled          bool   `json:"record_enabled,omitempty"`
 	RecordRetentionMinutes int    `json:"record_retention_minutes,omitempty"`

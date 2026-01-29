@@ -554,6 +554,8 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	//   "analytics": ["faceCapture"],
 	//   "rtsp_url": "rtsp://10.0.0.10:554/Streaming/Channels/101",
 	//   "proxy_path": "camera-001",
+	//   "central_host": "central.local",
+	//   "central_srt_port": 8890,
 	//   "central_path": "hq/camera-001",
 	//   "record_enabled": true,
 	//   "record_retention_minutes": 1440,
@@ -608,6 +610,7 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 
 	info.RTSPURL = strings.TrimSpace(info.RTSPURL)
 	info.ProxyPath = strings.TrimSpace(info.ProxyPath)
+	info.CentralHost = strings.TrimSpace(info.CentralHost)
 	info.CentralPath = strings.TrimSpace(info.CentralPath)
 	defaultPath := strings.TrimSpace(info.DeviceID)
 	if defaultPath == "" {
@@ -650,6 +653,24 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	}
 
 	s.upsertCameraInfo(key, info)
+
+	if s.uplink != nil {
+		if strings.TrimSpace(info.CentralHost) != "" {
+			req := uplink.Request{
+				CameraID:       info.DeviceID,
+				ProxyPath:      info.ProxyPath,
+				CentralHost:    info.CentralHost,
+				CentralSRTPort: info.CentralSRTPort,
+				CentralPath:    info.CentralPath,
+			}
+			req.Normalize()
+			if err := s.uplink.Start(req); err != nil {
+				log.Printf("[uplink] start failed for %s: %v", req.CameraID, err)
+			}
+		} else {
+			s.uplink.StopByCamera(info)
+		}
+	}
 
 	// Publica discovery para o Home Assistant (se tiver faceRecognized)
 	if err := s.publishHADiscovery(info); err != nil {
