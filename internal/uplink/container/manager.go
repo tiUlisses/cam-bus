@@ -25,7 +25,6 @@ var (
 	defaultFFmpegInputArgs = []string{
 		"-rtsp_transport", "tcp",
 		"-rw_timeout", "15000000",
-		"-stimeout", "15000000",
 	}
 	defaultFFmpegOutputArgs = []string{
 		"-c", "copy",
