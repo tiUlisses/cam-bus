@@ -31,10 +31,12 @@ type Manager struct {
 }
 
 type uplinkProcess struct {
-	cameraKey string
-	payload   Request
-	container string
-	ttlTimer  *time.Timer
+	cameraKey       string
+	payload         Request
+	container       string
+	containerID     string
+	containerStatus string
+	ttlTimer        *time.Timer
 	// startCount increments for every Start request; stopCount increments for every Stop request.
 	startCount int
 	stopCount  int
@@ -181,20 +183,23 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	srtURL := buildSRTURL(req.CentralHost, req.CentralSRTPort, req.CentralPath)
 	containerName := container.NameForCentralPath(req.CentralPath)
 	startCtx := context.Background()
-	if err := m.containerManager.Start(startCtx, container.Request{
+	containerID, err := m.containerManager.Start(startCtx, container.Request{
 		Name:     containerName,
 		ProxyURL: proxyURL,
 		SRTURL:   srtURL,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("start container uplink: %w", err)
 	}
 
 	proc := &uplinkProcess{
-		cameraKey:  cameraKey,
-		payload:    req,
-		container:  containerName,
-		startCount: 1,
-		stopCount:  0,
+		cameraKey:       cameraKey,
+		payload:         req,
+		container:       containerName,
+		containerID:     containerID,
+		containerStatus: "running",
+		startCount:      1,
+		stopCount:       0,
 	}
 	m.uplinks[cameraKey] = proc
 	m.refreshTTL(proc, req.TTLSeconds)

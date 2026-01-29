@@ -41,21 +41,21 @@ func NewManagerFromEnv() *Manager {
 	}
 }
 
-func (m *Manager) Start(ctx context.Context, req Request) error {
+func (m *Manager) Start(ctx context.Context, req Request) (string, error) {
 	if req.Name == "" {
-		return fmt.Errorf("container name required")
+		return "", fmt.Errorf("container name required")
 	}
 	if req.ProxyURL == "" {
-		return fmt.Errorf("proxy url required")
+		return "", fmt.Errorf("proxy url required")
 	}
 	if req.SRTURL == "" {
-		return fmt.Errorf("srt url required")
+		return "", fmt.Errorf("srt url required")
 	}
 	if err := m.ensureImage(ctx); err != nil {
-		return fmt.Errorf("ensure docker image: %w", err)
+		return "", fmt.Errorf("ensure docker image: %w", err)
 	}
 	_, _ = m.run(ctx, "rm", "-f", req.Name)
-	_, err := m.run(ctx, "run", "-d", "--name", req.Name, "--network", "host",
+	runOut, err := m.run(ctx, "run", "-d", "--name", req.Name, "--network", "host",
 		m.image, "ffmpeg",
 		"-rtsp_transport", "tcp",
 		"-i", req.ProxyURL,
@@ -64,9 +64,29 @@ func (m *Manager) Start(ctx context.Context, req Request) error {
 		req.SRTURL,
 	)
 	if err != nil {
-		return fmt.Errorf("start docker container: %w", err)
+		return "", fmt.Errorf("start docker container: %w", err)
 	}
-	return nil
+	containerID := strings.TrimSpace(runOut)
+	if containerID == "" {
+		return "", fmt.Errorf("start docker container: empty container id")
+	}
+	inspectOut, err := m.run(ctx, "inspect", "--format", "{{.State.Status}}|{{.State.ExitCode}}|{{.State.Error}}", containerID)
+	if err != nil {
+		return "", fmt.Errorf("inspect docker container %s: %w", containerID, err)
+	}
+	inspectParts := strings.SplitN(strings.TrimSpace(inspectOut), "|", 3)
+	if len(inspectParts) != 3 {
+		return "", fmt.Errorf("inspect docker container %s: unexpected output %q", containerID, strings.TrimSpace(inspectOut))
+	}
+	status := inspectParts[0]
+	exitCode := inspectParts[1]
+	stateErr := inspectParts[2]
+	if status != "running" {
+		logsOut, _ := m.run(ctx, "logs", "--tail", "50", containerID)
+		logsSnippet := strings.TrimSpace(logsOut)
+		return "", fmt.Errorf("container %s not running (status=%s exitCode=%s stateError=%s logs=%s)", containerID, status, exitCode, strings.TrimSpace(stateErr), logsSnippet)
+	}
+	return containerID, nil
 }
 
 func (m *Manager) ensureImage(ctx context.Context) error {
