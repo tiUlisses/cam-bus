@@ -88,43 +88,89 @@ func (m *Manager) Start(ctx context.Context, req Request) (string, error) {
 		return "", fmt.Errorf("ensure docker image: %w", err)
 	}
 	_, _ = m.run(ctx, "rm", "-f", req.Name)
-	ffmpegArgs := m.buildFFmpegArgs(req)
+
+	containerID, logsOut, err := m.startContainer(ctx, req, m.ffmpegInputArgs)
+	if err == nil {
+		return containerID, nil
+	}
+	if strings.Contains(logsOut, "Option rw_timeout not found.") {
+		log.Printf("ffmpeg in %q does not support -rw_timeout; retrying without it", m.image)
+		fallbackInputArgs := removeOptionWithValue(m.ffmpegInputArgs, "-rw_timeout")
+		_, _ = m.run(ctx, "rm", "-f", req.Name)
+		containerID, _, retryErr := m.startContainer(ctx, req, fallbackInputArgs)
+		if retryErr == nil {
+			return containerID, nil
+		}
+		return "", retryErr
+	}
+	return "", err
+}
+
+func (m *Manager) startContainer(ctx context.Context, req Request, inputArgs []string) (string, string, error) {
+	ffmpegArgs := m.buildFFmpegArgs(req, inputArgs)
 	runArgs := append([]string{"run", "-d", "--name", req.Name, "--network", "host", m.image}, ffmpegArgs...)
 	runOut, err := m.run(ctx, runArgs...)
 	if err != nil {
-		return "", fmt.Errorf("start docker container: %w", err)
+		return "", "", fmt.Errorf("start docker container: %w", err)
 	}
 	containerID := strings.TrimSpace(runOut)
 	if containerID == "" {
-		return "", fmt.Errorf("start docker container: empty container id")
+		return "", "", fmt.Errorf("start docker container: empty container id")
 	}
-	inspectOut, err := m.run(ctx, "inspect", "--format", "{{.State.Status}}|{{.State.ExitCode}}|{{.State.Error}}", containerID)
+	status, exitCode, stateErr, err := m.inspectState(ctx, containerID)
 	if err != nil {
-		return "", fmt.Errorf("inspect docker container %s: %w", containerID, err)
+		return "", "", err
 	}
-	inspectParts := strings.SplitN(strings.TrimSpace(inspectOut), "|", 3)
-	if len(inspectParts) != 3 {
-		return "", fmt.Errorf("inspect docker container %s: unexpected output %q", containerID, strings.TrimSpace(inspectOut))
-	}
-	status := inspectParts[0]
-	exitCode := inspectParts[1]
-	stateErr := inspectParts[2]
 	if status != "running" {
 		logsOut, _ := m.run(ctx, "logs", "--tail", "50", containerID)
 		logsSnippet := strings.TrimSpace(logsOut)
-		return "", fmt.Errorf("container %s not running (status=%s exitCode=%s stateError=%s logs=%s)", containerID, status, exitCode, strings.TrimSpace(stateErr), logsSnippet)
+		return "", logsOut, fmt.Errorf("container %s not running (status=%s exitCode=%s stateError=%s logs=%s)", containerID, status, exitCode, strings.TrimSpace(stateErr), logsSnippet)
 	}
-	return containerID, nil
+	return containerID, "", nil
 }
 
-func (m *Manager) buildFFmpegArgs(req Request) []string {
-	args := make([]string, 0, len(m.ffmpegGlobalArgs)+len(m.ffmpegInputArgs)+len(m.ffmpegOutputArgs)+4)
+func (m *Manager) inspectState(ctx context.Context, containerID string) (string, string, string, error) {
+	inspectOut, err := m.run(ctx, "inspect", "--format", "{{.State.Status}}|{{.State.ExitCode}}|{{.State.Error}}", containerID)
+	if err != nil {
+		return "", "", "", fmt.Errorf("inspect docker container %s: %w", containerID, err)
+	}
+	inspectParts := strings.SplitN(strings.TrimSpace(inspectOut), "|", 3)
+	if len(inspectParts) != 3 {
+		return "", "", "", fmt.Errorf("inspect docker container %s: unexpected output %q", containerID, strings.TrimSpace(inspectOut))
+	}
+	return inspectParts[0], inspectParts[1], inspectParts[2], nil
+}
+
+func (m *Manager) buildFFmpegArgs(req Request, inputArgs []string) []string {
+	args := make([]string, 0, len(m.ffmpegGlobalArgs)+len(inputArgs)+len(m.ffmpegOutputArgs)+4)
 	args = append(args, m.ffmpegGlobalArgs...)
-	args = append(args, m.ffmpegInputArgs...)
+	args = append(args, inputArgs...)
 	args = append(args, "-i", req.ProxyURL)
 	args = append(args, m.ffmpegOutputArgs...)
 	args = append(args, req.SRTURL)
 	return args
+}
+
+func removeOptionWithValue(args []string, option string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	filtered := make([]string, 0, len(args))
+	skipNext := false
+	for i, arg := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if arg == option {
+			if i+1 < len(args) {
+				skipNext = true
+			}
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	return filtered
 }
 
 func validateRequest(req Request) error {
