@@ -20,6 +20,7 @@ const (
 	defaultProxyRTSPBase = "rtsp://localhost:8554"
 	defaultSRTPacketSize = 1316
 	defaultSRTPort       = 8890
+	defaultSRTLatencyMS  = 200
 	defaultReconcileSecs = 15
 )
 
@@ -420,7 +421,8 @@ func buildSRTURL(host string, port int, path string) string {
 		port = defaultSRTPort
 	}
 	streamID := fmt.Sprintf("publish:%s", path)
-	query := fmt.Sprintf("streamid=%s&pkt_size=%d&mode=caller&transtype=live", streamID, defaultSRTPacketSize)
+	latency := getenvInt("UPLINK_SRT_LATENCY", defaultSRTLatencyMS)
+	query := fmt.Sprintf("streamid=%s&pkt_size=%d&latency=%d&mode=caller&transtype=live", streamID, defaultSRTPacketSize, latency)
 
 	u := url.URL{
 		Scheme:   "srt",

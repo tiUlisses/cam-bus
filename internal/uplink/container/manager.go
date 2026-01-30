@@ -23,6 +23,7 @@ var (
 		"-hide_banner",
 	}
 	defaultFFmpegInputArgs = []string{
+		"-fflags", "+nobuffer",
 		"-rtsp_transport", "tcp",
 		"-rw_timeout", "15000000",
 	}
@@ -142,13 +143,37 @@ func (m *Manager) inspectState(ctx context.Context, containerID string) (string,
 }
 
 func (m *Manager) buildFFmpegArgs(req Request, inputArgs []string) []string {
-	args := make([]string, 0, len(m.ffmpegGlobalArgs)+len(inputArgs)+len(m.ffmpegOutputArgs)+4)
+	normalizedInputArgs := normalizeInputArgs(req.ProxyURL, inputArgs)
+	args := make([]string, 0, len(m.ffmpegGlobalArgs)+len(normalizedInputArgs)+len(m.ffmpegOutputArgs)+4)
 	args = append(args, m.ffmpegGlobalArgs...)
-	args = append(args, inputArgs...)
+	args = append(args, normalizedInputArgs...)
 	args = append(args, "-i", req.ProxyURL)
 	args = append(args, m.ffmpegOutputArgs...)
 	args = append(args, req.SRTURL)
 	return args
+}
+
+func normalizeInputArgs(proxyURL string, inputArgs []string) []string {
+	args := append([]string(nil), inputArgs...)
+	switch urlScheme(proxyURL) {
+	case "file":
+		args = prependIfMissing(args, "-re")
+		args = removeOptionWithValue(args, "-rtsp_transport")
+	case "rtsp":
+		// keep args
+	default:
+		args = removeOptionWithValue(args, "-rtsp_transport")
+	}
+	return args
+}
+
+func prependIfMissing(args []string, value string) []string {
+	for _, arg := range args {
+		if arg == value {
+			return args
+		}
+	}
+	return append([]string{value}, args...)
 }
 
 func removeOptionWithValue(args []string, option string) []string {
@@ -174,7 +199,7 @@ func removeOptionWithValue(args []string, option string) []string {
 }
 
 func validateRequest(req Request) error {
-	if err := validateURLScheme(req.ProxyURL, "rtsp"); err != nil {
+	if err := validateURLScheme(req.ProxyURL, "rtsp", "file"); err != nil {
 		return fmt.Errorf("proxy url invalid: %w", err)
 	}
 	if err := validateURLScheme(req.SRTURL, "srt"); err != nil {
@@ -183,18 +208,29 @@ func validateRequest(req Request) error {
 	return nil
 }
 
-func validateURLScheme(rawURL, scheme string) error {
+func validateURLScheme(rawURL string, schemes ...string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return err
 	}
-	if strings.ToLower(parsed.Scheme) != scheme {
-		return fmt.Errorf("expected scheme %q, got %q", scheme, parsed.Scheme)
+	scheme := strings.ToLower(parsed.Scheme)
+	for _, expected := range schemes {
+		if scheme == expected {
+			if parsed.Host == "" && expected != "file" {
+				return fmt.Errorf("missing host")
+			}
+			return nil
+		}
 	}
-	if parsed.Host == "" {
-		return fmt.Errorf("missing host")
+	return fmt.Errorf("expected scheme %q, got %q", strings.Join(schemes, ","), parsed.Scheme)
+}
+
+func urlScheme(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
 	}
-	return nil
+	return strings.ToLower(parsed.Scheme)
 }
 
 func (m *Manager) InspectStatus(ctx context.Context, name string) (Status, error) {
