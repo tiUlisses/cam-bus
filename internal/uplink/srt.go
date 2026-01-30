@@ -25,13 +25,28 @@ type SRTQueryOptions struct {
 	ExtraParams string
 }
 
+const (
+	srtProfileCustom   = "custom"
+	srtProfileLatency  = "latency"
+	srtProfileBalanced = "balanced"
+	srtProfileQuality  = "quality"
+)
+
 func BuildSRTURLCandidates(host string, port int, path string) []string {
+	if strings.TrimSpace(host) == "" || strings.TrimSpace(path) == "" {
+		log.Printf("[uplink] host/path inválidos para SRT (host=%q path=%q)", host, path)
+		return nil
+	}
 	options := srtOptionsFromEnv()
 	candidates := srtOptionCandidates(options)
 	urls := make([]string, 0, len(candidates))
 	seen := make(map[string]struct{})
 	for _, candidate := range candidates {
 		srtURL := buildSRTURLWithOptions(host, port, path, candidate)
+		if err := validateSRTURL(srtURL); err != nil {
+			log.Printf("[uplink] srt url inválida: %v", err)
+			continue
+		}
 		if _, ok := seen[srtURL]; ok {
 			continue
 		}
@@ -72,6 +87,20 @@ func buildSRTURLWithOptions(host string, port int, path string, opts SRTQueryOpt
 }
 
 func srtOptionsFromEnv() SRTQueryOptions {
+	profile := srtProfileFromEnv()
+	if profile == srtProfileCustom {
+		return srtOptionsFromCustomEnv()
+	}
+	opts, ok := srtOptionsForProfile(profile)
+	if !ok {
+		log.Printf("[uplink] perfil SRT inválido UPLINK_SRT_PROFILE=%q, usando custom", profile)
+		return srtOptionsFromCustomEnv()
+	}
+	applySRTAuxEnv(&opts)
+	return opts
+}
+
+func srtOptionsFromCustomEnv() SRTQueryOptions {
 	return SRTQueryOptions{
 		Latency:     getenvInt("UPLINK_SRT_LATENCY", 0),
 		PacketSize:  getenvInt("UPLINK_SRT_PACKET_SIZE", 0),
@@ -88,6 +117,44 @@ func srtOptionsFromEnv() SRTQueryOptions {
 		TLPktDrop:   getenvBool("UPLINK_SRT_TLPKTDROP", false),
 		ExtraParams: strings.TrimSpace(os.Getenv("UPLINK_SRT_EXTRA_PARAMS")),
 	}
+}
+
+func srtOptionsForProfile(profile string) (SRTQueryOptions, bool) {
+	switch profile {
+	case srtProfileLatency:
+		return SRTQueryOptions{
+			Latency:    80,
+			PacketSize: defaultSRTPacketSize,
+			RcvBuf:     2_097_152,
+		}, true
+	case srtProfileBalanced:
+		return SRTQueryOptions{
+			Latency:    defaultSRTLatencyMS,
+			PacketSize: defaultSRTPacketSize,
+		}, true
+	case srtProfileQuality:
+		return SRTQueryOptions{
+			Latency:    400,
+			PacketSize: defaultSRTPacketSize,
+			MaxBW:      8_000_000,
+			RcvBuf:     8_388_608,
+		}, true
+	default:
+		return SRTQueryOptions{}, false
+	}
+}
+
+func applySRTAuxEnv(opts *SRTQueryOptions) {
+	opts.Passphrase = strings.TrimSpace(os.Getenv("UPLINK_SRT_PASSPHRASE"))
+	opts.PBKeyLen = getenvInt("UPLINK_SRT_PBKEYLEN", 0)
+}
+
+func srtProfileFromEnv() string {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("UPLINK_SRT_PROFILE")))
+	if value == "" {
+		return srtProfileCustom
+	}
+	return value
 }
 
 func srtOptionCandidates(base SRTQueryOptions) []SRTQueryOptions {
@@ -196,4 +263,22 @@ func applySRTQueryOptions(queryValues url.Values, opts SRTQueryOptions) {
 		}
 		queryValues.Set(key, values[len(values)-1])
 	}
+}
+
+func validateSRTURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse srt url: %w", err)
+	}
+	if parsed.Scheme != "srt" {
+		return fmt.Errorf("srt url precisa de esquema srt: %q", raw)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("srt url sem host: %q", raw)
+	}
+	q := parsed.Query()
+	if strings.TrimSpace(q.Get("streamid")) == "" {
+		return fmt.Errorf("srt url sem streamid: %q", raw)
+	}
+	return nil
 }

@@ -446,7 +446,7 @@ func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
 	for _, srtURL := range srtURLs {
 		args := append([]string{}, baseArgs...)
 		args = append(args, srtURL)
-		commands = append(commands, shellQuoteArgs(args))
+		commands = append(commands, joinCommandArgs(args))
 	}
 	if len(commands) == 1 {
 		return commands[0]
@@ -454,20 +454,8 @@ func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
 	return strings.Join(commands, " || ")
 }
 
-func shellQuoteArgs(args []string) string {
-	quoted := make([]string, 0, len(args))
-	for _, arg := range args {
-		quoted = append(quoted, shellQuote(arg))
-	}
-	return strings.Join(quoted, " ")
-}
-
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	escaped := strings.ReplaceAll(value, "'", "'\"'\"'")
-	return "'" + escaped + "'"
+func joinCommandArgs(args []string) string {
+	return strings.Join(args, " ")
 }
 
 func retentionForCamera(info core.CameraInfo, defaultRetention time.Duration) time.Duration {
