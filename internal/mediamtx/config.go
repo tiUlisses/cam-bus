@@ -339,12 +339,30 @@ func buildSRTURL(host string, port int, path string) string {
 	}
 	streamID := fmt.Sprintf("publish:%s", path)
 	latency := getenvInt("UPLINK_SRT_LATENCY", defaultSRTLatencyMS)
-	query := fmt.Sprintf("streamid=%s&pkt_size=%d&latency=%d&mode=caller&transtype=live", streamID, defaultSRTPacketSize, latency)
+	packetSize := getenvInt("UPLINK_SRT_PACKET_SIZE", defaultSRTPacketSize)
+	maxBW := getenvInt("UPLINK_SRT_MAXBW", 0)
+	rcvBuf := getenvInt("UPLINK_SRT_RCVBUF", 0)
+	queryValues := url.Values{}
+	queryValues.Set("streamid", streamID)
+	queryValues.Set("mode", "caller")
+	queryValues.Set("transtype", "live")
+	if packetSize > 0 {
+		queryValues.Set("pkt_size", fmt.Sprintf("%d", packetSize))
+	}
+	if latency > 0 {
+		queryValues.Set("latency", fmt.Sprintf("%d", latency))
+	}
+	if maxBW > 0 {
+		queryValues.Set("maxbw", fmt.Sprintf("%d", maxBW))
+	}
+	if rcvBuf > 0 {
+		queryValues.Set("rcvbuf", fmt.Sprintf("%d", rcvBuf))
+	}
 
 	u := url.URL{
 		Scheme:   "srt",
 		Host:     fmt.Sprintf("%s:%d", host, port),
-		RawQuery: query,
+		RawQuery: queryValues.Encode(),
 	}
 	return u.String()
 }
