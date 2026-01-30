@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sua-org/cam-bus/internal/core"
+	"github.com/sua-org/cam-bus/internal/uplink"
 	"gopkg.in/yaml.v3"
 )
 
@@ -83,19 +84,21 @@ type GlobalPatch struct {
 
 // Generator gera e aplica configs do MediaMTX a partir de câmeras ativas.
 type Generator struct {
-	path              string
-	reloadPID         int
-	apiBaseURL        string
-	reloadAuthUser    string
-	reloadAuthPass    string
-	reloadAuthToken   string
-	apiUser           string
-	apiPass           string
-	recordDeleteAfter time.Duration
-	republishOnReady  bool
-	proxyRTSPBase     string
-	httpClient        *http.Client
-	mu                sync.Mutex
+	path               string
+	reloadPID          int
+	apiBaseURL         string
+	reloadAuthUser     string
+	reloadAuthPass     string
+	reloadAuthToken    string
+	apiUser            string
+	apiPass            string
+	recordDeleteAfter  time.Duration
+	republishOnReady   bool
+	proxyRTSPBase      string
+	httpClient         *http.Client
+	ignoreUplink       bool
+	defaultCentralHost string
+	mu                 sync.Mutex
 }
 
 // NewGeneratorFromEnv cria o gerador baseado em variáveis de ambiente.
@@ -137,22 +140,26 @@ func NewGeneratorFromEnv() *Generator {
 	}
 
 	uplinkMode := strings.ToLower(strings.TrimSpace(os.Getenv("UPLINK_MODE")))
-	republishOnReady := uplinkMode == "mediamtx"
+	ignoreUplink := getenvBool("IGNORE_UPLINK", false)
+	republishOnReady := uplinkMode == "mediamtx" || ignoreUplink
 	proxyRTSPBase := strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/")
+	defaultCentralHost := strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST"))
 
 	return &Generator{
-		path:              path,
-		reloadPID:         reloadPID,
-		apiBaseURL:        apiBaseURL,
-		reloadAuthUser:    reloadUser,
-		reloadAuthPass:    reloadPass,
-		reloadAuthToken:   reloadToken,
-		apiUser:           apiUser,
-		apiPass:           apiPass,
-		recordDeleteAfter: retention,
-		republishOnReady:  republishOnReady,
-		proxyRTSPBase:     proxyRTSPBase,
-		httpClient:        &http.Client{Timeout: 5 * time.Second},
+		path:               path,
+		reloadPID:          reloadPID,
+		apiBaseURL:         apiBaseURL,
+		reloadAuthUser:     reloadUser,
+		reloadAuthPass:     reloadPass,
+		reloadAuthToken:    reloadToken,
+		apiUser:            apiUser,
+		apiPass:            apiPass,
+		recordDeleteAfter:  retention,
+		republishOnReady:   republishOnReady,
+		proxyRTSPBase:      proxyRTSPBase,
+		httpClient:         &http.Client{Timeout: 5 * time.Second},
+		ignoreUplink:       ignoreUplink,
+		defaultCentralHost: defaultCentralHost,
 	}
 }
 
@@ -169,7 +176,7 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	if err != nil {
 		return err
 	}
-	cfg := buildConfig(cameras, g.recordDeleteAfter, g.apiUser, g.apiPass, g.republishOnReady, g.proxyRTSPBase)
+	cfg := buildConfig(cameras, g.recordDeleteAfter, g.apiUser, g.apiPass, g.republishOnReady, g.proxyRTSPBase, g.ignoreUplink, g.defaultCentralHost)
 	if g.apiUser == "" && g.apiPass == "" {
 		cfg.AuthInternalUsers = existing.AuthInternalUsers
 	}
@@ -192,7 +199,7 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	return nil
 }
 
-func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, apiPass string, republishOnReady bool, proxyRTSPBase string) Config {
+func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, apiPass string, republishOnReady bool, proxyRTSPBase string, ignoreUplink bool, defaultCentralHost string) Config {
 	cfg := Config{
 		RTSPAddress:       ":8554",
 		HLS:               false,
@@ -212,6 +219,14 @@ func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, ap
 	}
 
 	for _, info := range cameras {
+		if ignoreUplink {
+			if info.CentralHost == "" {
+				info.CentralHost = defaultCentralHost
+			}
+			if info.CentralPath == "" {
+				info.CentralPath = uplink.CentralPathFor(info)
+			}
+		}
 		path := strings.TrimSpace(info.ProxyPath)
 		if path == "" {
 			path = info.DeviceID
@@ -559,4 +574,19 @@ func getenvInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+func getenvBool(key string, def bool) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return def
+	}
 }

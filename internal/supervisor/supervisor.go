@@ -637,6 +637,14 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	if info.CentralPath == "" {
 		info.CentralPath = uplink.CentralPathFor(info)
 	}
+	if s.uplink != nil && s.uplink.IgnoreUplinkEnabled() {
+		if info.CentralHost == "" {
+			info.CentralHost = s.uplink.DefaultCentralHost()
+		}
+		if info.CentralPath == "" {
+			info.CentralPath = uplink.CentralPathFor(info)
+		}
+	}
 	if info.RecordRetentionMinutes < 0 {
 		log.Printf("[supervisor] record_retention_minutes inválido para %s, usando 0", info.DeviceID)
 		info.RecordRetentionMinutes = 0
