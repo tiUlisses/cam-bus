@@ -15,6 +15,23 @@ Exemplo de payload (START):
 }
 ```
 
+## Uplink always-on
+
+Para iniciar uplinks automaticamente na inicialização do supervisor, configure:
+
+```bash
+UPLINK_ALWAYS_ON=true
+```
+
+Para restringir o always-on a algumas câmeras, defina uma lista de paths (separados por vírgula, espaço ou ponto e vírgula):
+
+```bash
+UPLINK_ALWAYS_ON_PATHS="acme/hq/camera-001,camera-002"
+```
+
+A lista aceita `centralPath`, `proxyPath` ou `cameraId` e é comparada sem `/` nas bordas e sem diferenciar maiúsculas/minúsculas.
+Quando o always-on está ativo, o supervisor aciona `uplink.Start` no carregamento das câmeras e o TTL informado é ignorado para evitar encerramento automático.
+
 ## Modos de uplink (container vs mediamtx)
 
 Por padrão (`UPLINK_MODE=container`), o cam-bus inicia um container FFmpeg para
