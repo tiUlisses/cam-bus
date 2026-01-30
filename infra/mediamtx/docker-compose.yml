@@ -2,7 +2,10 @@ version: "3.9"
 
 services:
   mtx-proxy:
-    image: bluenviron/mediamtx:latest
+    build:
+      context: .
+      dockerfile: ./proxy/Dockerfile
+    image: cam-bus/mtx-proxy:latest
     container_name: mtx-proxy
     volumes:
       - ./proxy/mediamtx.yml:/mediamtx.yml:rw
