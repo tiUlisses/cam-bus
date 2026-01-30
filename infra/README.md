@@ -81,11 +81,19 @@ Requisitos de conectividade:
 
 ## Tuning SRT
 
-Os parâmetros SRT podem ser ajustados via variáveis de ambiente. Quando não há
-configuração explícita, o cam-bus usa apenas o perfil padrão. Se precisar de
-uma tentativa extra com parâmetros de compatibilidade (maior tolerância a
-jitter), habilite `UPLINK_SRT_COMPAT_PROFILE=true`.
+Os parâmetros SRT podem ser ajustados via variáveis de ambiente. Por padrão,
+usa-se o perfil `custom` (valores definidos pelas variáveis abaixo). Para usar
+presets, defina `UPLINK_SRT_PROFILE` com um dos valores:
 
+- `latency` (otimizado para menor latência)
+- `balanced` (equilíbrio entre estabilidade e tempo de entrega)
+- `quality` (mais estável para qualidade/links com perda)
+- `custom` (usa as variáveis de ambiente detalhadas)
+
+Se precisar de uma tentativa extra com parâmetros de compatibilidade (maior
+tolerância a jitter), habilite `UPLINK_SRT_COMPAT_PROFILE=true`.
+
+- `UPLINK_SRT_PROFILE` (`latency`/`balanced`/`quality`/`custom`)
 - `UPLINK_SRT_PACKET_SIZE` (default: 1316)
 - `UPLINK_SRT_MAXBW` (bps, opcional)
 - `UPLINK_SRT_RCVBUF` (bytes, opcional)
@@ -105,6 +113,7 @@ jitter), habilite `UPLINK_SRT_COMPAT_PROFILE=true`.
 Exemplo para link instável (prioriza tolerância a jitter):
 
 ```bash
+UPLINK_SRT_PROFILE=quality
 UPLINK_SRT_LATENCY=400
 UPLINK_SRT_MAXBW=8000000
 UPLINK_SRT_RCVBUF=8388608
@@ -113,6 +122,7 @@ UPLINK_SRT_RCVBUF=8388608
 Exemplo para baixa latência (prioriza tempo de entrega):
 
 ```bash
+UPLINK_SRT_PROFILE=latency
 UPLINK_SRT_LATENCY=80
 UPLINK_SRT_PACKET_SIZE=1316
 UPLINK_SRT_RCVBUF=2097152
@@ -121,6 +131,7 @@ UPLINK_SRT_RCVBUF=2097152
 Exemplo para links instáveis com tolerância a jitter/perda:
 
 ```bash
+UPLINK_SRT_PROFILE=quality
 UPLINK_SRT_LATENCY=500
 UPLINK_SRT_PEERLATENCY=500
 UPLINK_SRT_RCVLATENCY=500
