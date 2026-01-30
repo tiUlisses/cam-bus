@@ -441,10 +441,6 @@ func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
 	if len(srtURLs) == 0 {
 		srtURLs = []string{""}
 	}
-	if len(srtURLs) == 1 {
-		args := append(baseArgs, srtURLs[0])
-		return strings.Join(args, " ")
-	}
 
 	commands := make([]string, 0, len(srtURLs))
 	for _, srtURL := range srtURLs {
@@ -452,7 +448,10 @@ func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
 		args = append(args, srtURL)
 		commands = append(commands, shellQuoteArgs(args))
 	}
-	return fmt.Sprintf("sh -c %s", shellQuote(strings.Join(commands, " || ")))
+	if len(commands) == 1 {
+		return commands[0]
+	}
+	return strings.Join(commands, " || ")
 }
 
 func shellQuoteArgs(args []string) string {
