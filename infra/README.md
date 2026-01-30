@@ -32,6 +32,8 @@ UPLINK_ALWAYS_ON_PATHS="acme/hq/camera-001,camera-002"
 A lista aceita `centralPath`, `proxyPath` ou `cameraId` e é comparada sem `/` nas bordas e sem diferenciar maiúsculas/minúsculas.
 Quando o always-on está ativo, o supervisor aciona `uplink.Start` no carregamento das câmeras, o TTL informado é ignorado para evitar encerramento automático e comandos de stop são ignorados.
 
+Quando `UPLINK_ALWAYS_ON=true` e o payload da câmera não inclui `centralHost`, o cam-bus usa `MEDIAMTX_CENTRAL_URL` para definir o destino do MediaMTX central (host e porta SRT). Se `UPLINK_CENTRAL_HOST` já estiver definido, ele continua tendo prioridade.
+
 ## IGNORE_UPLINK
 
 Quando `IGNORE_UPLINK=yes`, o cam-bus ignora comandos de start/stop e TTLs, tratando todas as câmeras como always-on.
