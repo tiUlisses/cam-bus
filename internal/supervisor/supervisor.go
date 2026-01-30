@@ -613,16 +613,16 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	info.ProxyPath = strings.TrimSpace(info.ProxyPath)
 	info.CentralHost = strings.TrimSpace(info.CentralHost)
 	info.CentralPath = strings.TrimSpace(info.CentralPath)
-	defaultPath := strings.TrimSpace(info.DeviceID)
-	if defaultPath == "" {
-		defaultPath = fmt.Sprintf("%s_%s_%s_%s", info.Tenant, info.Building, info.Floor, info.DeviceID)
-		defaultPath = strings.Trim(defaultPath, "_")
+	defaultProxyPath := strings.TrimSpace(info.DeviceID)
+	if defaultProxyPath == "" {
+		defaultProxyPath = fmt.Sprintf("%s_%s_%s_%s", info.Tenant, info.Building, info.Floor, info.DeviceID)
+		defaultProxyPath = strings.Trim(defaultProxyPath, "_")
 	}
 	if info.ProxyPath == "" {
-		info.ProxyPath = defaultPath
+		info.ProxyPath = defaultProxyPath
 	}
 	if info.CentralPath == "" {
-		info.CentralPath = defaultPath
+		info.CentralPath = uplink.CentralPathFor(info)
 	}
 	if info.RecordRetentionMinutes < 0 {
 		log.Printf("[supervisor] record_retention_minutes inválido para %s, usando 0", info.DeviceID)
