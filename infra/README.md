@@ -32,6 +32,16 @@ UPLINK_ALWAYS_ON_PATHS="acme/hq/camera-001,camera-002"
 A lista aceita `centralPath`, `proxyPath` ou `cameraId` e é comparada sem `/` nas bordas e sem diferenciar maiúsculas/minúsculas.
 Quando o always-on está ativo, o supervisor aciona `uplink.Start` no carregamento das câmeras e o TTL informado é ignorado para evitar encerramento automático.
 
+## IGNORE_UPLINK
+
+Quando `IGNORE_UPLINK=yes`, o cam-bus ignora comandos de start/stop e TTLs, tratando todas as câmeras como always-on.
+Nesse modo, o supervisor garante `centralHost` e `centralPath` para todas as câmeras:
+
+- `centralHost` usa `UPLINK_CENTRAL_HOST` (quando presente).
+- `centralPath` é gerado a partir de `uplink.CentralPathFor(info)` quando vazio.
+
+Use este modo quando quiser que o uplink sempre permaneça ativo e o MediaMTX replique todas as câmeras automaticamente.
+
 ## Modos de uplink (container vs mediamtx)
 
 Por padrão (`UPLINK_MODE=container`), o cam-bus inicia um container FFmpeg para

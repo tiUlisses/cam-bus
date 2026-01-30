@@ -37,6 +37,7 @@ type Manager struct {
 	reconcileStop      chan struct{}
 	alwaysOn           bool
 	alwaysOnPaths      map[string]struct{}
+	ignoreUplink       bool
 	mu                 sync.Mutex
 	uplinks            map[string]*uplinkProcess
 	statusHook         atomic.Value
@@ -76,6 +77,7 @@ func NewManagerFromEnv() *Manager {
 		reconcileStop:      make(chan struct{}),
 		alwaysOn:           getenvBool("UPLINK_ALWAYS_ON", false),
 		alwaysOnPaths:      alwaysOnPaths,
+		ignoreUplink:       getenvBool("IGNORE_UPLINK", false),
 		uplinks:            make(map[string]*uplinkProcess),
 	}
 	manager.startReconciler()
@@ -84,6 +86,20 @@ func NewManagerFromEnv() *Manager {
 
 func (m *Manager) SetStatusHook(h StatusHook) {
 	m.statusHook.Store(h)
+}
+
+func (m *Manager) IgnoreUplinkEnabled() bool {
+	if m == nil {
+		return false
+	}
+	return m.ignoreUplink
+}
+
+func (m *Manager) DefaultCentralHost() string {
+	if m == nil {
+		return ""
+	}
+	return m.defaultCentralHost
 }
 
 func (r *Request) Normalize() {
@@ -116,6 +132,9 @@ func (m *Manager) Stop(req Request) error {
 }
 
 func (m *Manager) StopByCamera(info core.CameraInfo) {
+	if m == nil || m.ignoreUplink {
+		return
+	}
 	candidates := make(map[string]struct{})
 	if centralPath := strings.Trim(strings.TrimSpace(info.CentralPath), "/"); centralPath != "" {
 		candidates[centralPath] = struct{}{}
@@ -142,6 +161,9 @@ func (m *Manager) StopByCamera(info core.CameraInfo) {
 }
 
 func (m *Manager) StopAll() {
+	if m == nil || m.ignoreUplink {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -154,6 +176,9 @@ func (m *Manager) StopAll() {
 func (m *Manager) AlwaysOnEnabled(info core.CameraInfo) bool {
 	if m == nil {
 		return false
+	}
+	if m.ignoreUplink {
+		return true
 	}
 	if m.alwaysOn {
 		return true
@@ -405,6 +430,10 @@ func (m *Manager) reconcileOnce() {
 }
 
 func (m *Manager) stopUplink(cameraKey, reason string) error {
+	if m != nil && m.ignoreUplink {
+		log.Printf("[uplink] ignoreUplink ativo, ignorando stop para %s (%s)", cameraKey, reason)
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -480,6 +509,10 @@ func (m *Manager) refreshTTL(proc *uplinkProcess, ttlSeconds int) {
 		proc.ttlTimer.Stop()
 		proc.ttlTimer = nil
 	}
+	if m != nil && m.ignoreUplink {
+		log.Printf("[uplink] ttl ignored for %s (ignore_uplink)", proc.cameraKey)
+		return
+	}
 	if proc.alwaysOn {
 		log.Printf("[uplink] ttl ignored for %s (always-on)", proc.cameraKey)
 		return
@@ -498,6 +531,9 @@ func (m *Manager) refreshTTL(proc *uplinkProcess, ttlSeconds int) {
 func (m *Manager) isAlwaysOnRequest(req Request) bool {
 	if m == nil {
 		return false
+	}
+	if m.ignoreUplink {
+		return true
 	}
 	if m.alwaysOn {
 		return true
