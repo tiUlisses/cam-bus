@@ -651,7 +651,7 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 
 	s.upsertCameraInfo(key, info)
 
-	if s.uplink != nil {
+	if s.uplink != nil && s.uplink.AlwaysOnEnabled(info) {
 		if strings.TrimSpace(info.CentralHost) != "" {
 			req := uplink.Request{
 				CameraID:       info.DeviceID,
@@ -665,6 +665,7 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 				log.Printf("[uplink] start failed for %s: %v", req.CameraID, err)
 			}
 		} else {
+			log.Printf("[uplink] always-on ativo mas central_host vazio para %s, desligando uplink", info.DeviceID)
 			s.uplink.StopByCamera(info)
 		}
 	}

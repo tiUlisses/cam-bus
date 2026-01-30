@@ -35,6 +35,8 @@ type Manager struct {
 	containerManager   *container.Manager
 	reconcileInterval  time.Duration
 	reconcileStop      chan struct{}
+	alwaysOn           bool
+	alwaysOnPaths      map[string]struct{}
 	mu                 sync.Mutex
 	uplinks            map[string]*uplinkProcess
 	statusHook         atomic.Value
@@ -47,6 +49,7 @@ type uplinkProcess struct {
 	containerID     string
 	containerStatus string
 	ttlTimer        *time.Timer
+	alwaysOn        bool
 	// startCount increments for every Start request; stopCount increments for every Stop request.
 	startCount int
 	stopCount  int
@@ -62,6 +65,7 @@ type Request struct {
 }
 
 func NewManagerFromEnv() *Manager {
+	alwaysOnPaths := parseListEnv(os.Getenv("UPLINK_ALWAYS_ON_PATHS"))
 	manager := &Manager{
 		proxyRTSPBase:      strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/"),
 		defaultCentralHost: strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST")),
@@ -70,6 +74,8 @@ func NewManagerFromEnv() *Manager {
 		containerManager:   container.NewManagerFromEnv(),
 		reconcileInterval:  time.Duration(getenvInt("UPLINK_RECONCILE_INTERVAL_SECONDS", defaultReconcileSecs)) * time.Second,
 		reconcileStop:      make(chan struct{}),
+		alwaysOn:           getenvBool("UPLINK_ALWAYS_ON", false),
+		alwaysOnPaths:      alwaysOnPaths,
 		uplinks:            make(map[string]*uplinkProcess),
 	}
 	manager.startReconciler()
@@ -145,6 +151,33 @@ func (m *Manager) StopAll() {
 	}
 }
 
+func (m *Manager) AlwaysOnEnabled(info core.CameraInfo) bool {
+	if m == nil {
+		return false
+	}
+	if m.alwaysOn {
+		return true
+	}
+	if len(m.alwaysOnPaths) == 0 {
+		return false
+	}
+	candidates := []string{
+		info.CentralPath,
+		info.ProxyPath,
+		info.DeviceID,
+	}
+	for _, raw := range candidates {
+		if raw == "" {
+			continue
+		}
+		key := normalizeAlwaysOnKey(raw)
+		if _, ok := m.alwaysOnPaths[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) applyDefaults(req Request) Request {
 	if req.ProxyPath == "" {
 		req.ProxyPath = req.CameraID
@@ -188,9 +221,11 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	alwaysOn := m.isAlwaysOnRequest(req)
 	if existing, ok := m.uplinks[cameraKey]; ok {
 		if sameRequest(existing.payload, req) {
 			existing.startCount++
+			existing.alwaysOn = alwaysOn
 			log.Printf("[uplink] already running for %s, startCount=%d stopCount=%d, refreshing TTL", cameraKey, existing.startCount, existing.stopCount)
 			m.refreshTTL(existing, req.TTLSeconds)
 			return nil
@@ -209,6 +244,7 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 			container:       "mediamtx-proxy",
 			containerID:     "",
 			containerStatus: "running",
+			alwaysOn:        alwaysOn,
 			startCount:      1,
 			stopCount:       0,
 		}
@@ -252,6 +288,7 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 		container:       containerName,
 		containerID:     containerID,
 		containerStatus: "running",
+		alwaysOn:        alwaysOn,
 		startCount:      1,
 		stopCount:       0,
 	}
@@ -438,6 +475,10 @@ func (m *Manager) refreshTTL(proc *uplinkProcess, ttlSeconds int) {
 		proc.ttlTimer.Stop()
 		proc.ttlTimer = nil
 	}
+	if proc.alwaysOn {
+		log.Printf("[uplink] ttl ignored for %s (always-on)", proc.cameraKey)
+		return
+	}
 	if ttlSeconds <= 0 {
 		return
 	}
@@ -447,6 +488,33 @@ func (m *Manager) refreshTTL(proc *uplinkProcess, ttlSeconds int) {
 			log.Printf("[uplink] ttl stop failed for %s: %v", proc.cameraKey, err)
 		}
 	})
+}
+
+func (m *Manager) isAlwaysOnRequest(req Request) bool {
+	if m == nil {
+		return false
+	}
+	if m.alwaysOn {
+		return true
+	}
+	if len(m.alwaysOnPaths) == 0 {
+		return false
+	}
+	candidates := []string{
+		req.CentralPath,
+		req.ProxyPath,
+		req.CameraID,
+	}
+	for _, raw := range candidates {
+		if raw == "" {
+			continue
+		}
+		key := normalizeAlwaysOnKey(raw)
+		if _, ok := m.alwaysOnPaths[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func sameRequest(a, b Request) bool {
@@ -485,6 +553,39 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func getenvBool(key string, def bool) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return def
+	}
+}
+
+func parseListEnv(raw string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		key := normalizeAlwaysOnKey(part)
+		if key == "" {
+			continue
+		}
+		out[key] = struct{}{}
+	}
+	return out
+}
+
+func normalizeAlwaysOnKey(raw string) string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(raw), "/"))
 }
 
 func normalizeMode(raw string) string {
