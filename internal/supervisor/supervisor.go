@@ -765,16 +765,20 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 		s.setUplinkState(s.keyFor(info), req)
 		s.refreshMediaMTXConfig()
 	case "stop":
-		if err := s.uplink.Stop(req); err != nil {
-			log.Printf("[uplink] stop failed for %s: %v", req.CameraID, err)
-			return
-		}
 		info := core.CameraInfo{
 			Tenant:     tenant,
 			Building:   building,
 			Floor:      floor,
 			DeviceType: devType,
 			DeviceID:   devID,
+		}
+		if s.uplink != nil && s.uplink.AlwaysOnEnabled(info) {
+			log.Printf("[uplink] stop ignored for %s: always-on ativo", info.DeviceID)
+			return
+		}
+		if err := s.uplink.Stop(req); err != nil {
+			log.Printf("[uplink] stop failed for %s: %v", req.CameraID, err)
+			return
 		}
 		s.maybeStopUplinkState(s.keyFor(info))
 		s.refreshMediaMTXConfig()
