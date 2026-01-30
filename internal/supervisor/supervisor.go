@@ -33,6 +33,7 @@ type Supervisor struct {
 
 	mu             sync.Mutex
 	cameras        map[string]core.CameraInfo
+	uplinkStates   map[string]uplinkState
 	workers        map[string]*cameraWorker
 	statusInterval time.Duration
 	proc           *process.Process // <- NOVO: processo do cam-bus para métricas
@@ -57,6 +58,17 @@ type workerSnapshot struct {
 	StatusReason  string
 	EverConnected bool
 	Analytics     []string
+}
+
+type uplinkState struct {
+	cameraID       string
+	proxyPath      string
+	centralHost    string
+	centralPath    string
+	centralSRTPort int
+	ttlSeconds     int
+	startCount     int
+	stopCount      int
 }
 
 func (s *Supervisor) snapshotWorkers() []workerSnapshot {
@@ -139,6 +151,7 @@ func New(mqtt *mqttclient.Client, baseTopic string) *Supervisor {
 		uplink:         uplinkManager,
 		mtxGen:         mediamtx.NewGeneratorFromEnv(),
 		cameras:        make(map[string]core.CameraInfo),
+		uplinkStates:   make(map[string]uplinkState),
 		workers:        make(map[string]*cameraWorker),
 		statusInterval: statusInterval,
 		proc:           procHandle,
@@ -663,10 +676,15 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 			req.Normalize()
 			if err := s.uplink.Start(req); err != nil {
 				log.Printf("[uplink] start failed for %s: %v", req.CameraID, err)
+			} else {
+				s.setUplinkState(key, req)
+				s.refreshMediaMTXConfig()
 			}
 		} else {
 			log.Printf("[uplink] always-on ativo mas central_host vazio para %s, desligando uplink", info.DeviceID)
 			s.uplink.StopByCamera(info)
+			s.clearUplinkState(key)
+			s.refreshMediaMTXConfig()
 		}
 	}
 
@@ -689,6 +707,8 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 	offset := len(baseParts)
 	tenant := parts[offset+0]
 	building := parts[offset+1]
+	floor := parts[offset+2]
+	devType := parts[offset+3]
 	devID := parts[offset+4]
 	action := parts[len(parts)-1]
 
@@ -703,9 +723,11 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 			req.CentralPath = strings.Trim(req.ProxyPath, "/")
 		} else {
 			req.CentralPath = uplink.CentralPathFor(core.CameraInfo{
-				Tenant:   tenant,
-				Building: building,
-				DeviceID: devID,
+				Tenant:     tenant,
+				Building:   building,
+				Floor:      floor,
+				DeviceType: devType,
+				DeviceID:   devID,
 			})
 		}
 	}
@@ -718,11 +740,31 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 	case "start":
 		if err := s.uplink.Start(req); err != nil {
 			log.Printf("[uplink] start failed for %s: %v", req.CameraID, err)
+			return
 		}
+		info := core.CameraInfo{
+			Tenant:     tenant,
+			Building:   building,
+			Floor:      floor,
+			DeviceType: devType,
+			DeviceID:   devID,
+		}
+		s.setUplinkState(s.keyFor(info), req)
+		s.refreshMediaMTXConfig()
 	case "stop":
 		if err := s.uplink.Stop(req); err != nil {
 			log.Printf("[uplink] stop failed for %s: %v", req.CameraID, err)
+			return
 		}
+		info := core.CameraInfo{
+			Tenant:     tenant,
+			Building:   building,
+			Floor:      floor,
+			DeviceType: devType,
+			DeviceID:   devID,
+		}
+		s.maybeStopUplinkState(s.keyFor(info))
+		s.refreshMediaMTXConfig()
 	default:
 		log.Printf("[uplink] unknown uplink action: %s", action)
 	}
@@ -743,6 +785,11 @@ func (s *Supervisor) handleUplinkStatus(status uplink.Status) {
 	}
 	if err := s.mqtt.Publish(topic, 1, false, payload); err != nil {
 		log.Printf("[uplink] status publish failed for %s: %v", topic, err)
+	}
+	if status.State == "stopped" || status.State == "error" {
+		key := s.keyFor(info)
+		s.clearUplinkState(key)
+		s.refreshMediaMTXConfig()
 	}
 }
 
@@ -1003,6 +1050,7 @@ func (s *Supervisor) cleanupCamera(info core.CameraInfo) {
 	log.Printf("[supervisor] cleanup camera %s (handleInfoMessage/stopAll)", key)
 	s.stopCamera(key)
 	s.removeCameraInfo(key)
+	s.clearUplinkState(key)
 	if s.uplink != nil {
 		s.uplink.StopByCamera(info)
 	}
@@ -1014,10 +1062,33 @@ func (s *Supervisor) refreshMediaMTXConfig() {
 		return
 	}
 
-	infos := s.snapshotCameraInfos()
+	infos := s.snapshotCameraInfosForMediaMTX()
 	if err := s.mtxGen.Sync(infos); err != nil {
 		log.Printf("[supervisor] erro ao atualizar config do MediaMTX: %v", err)
 	}
+}
+
+func (s *Supervisor) snapshotCameraInfosForMediaMTX() []core.CameraInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	infos := make([]core.CameraInfo, 0, len(s.cameras))
+	for key, info := range s.cameras {
+		if state, ok := s.uplinkStates[key]; ok && state.startCount > state.stopCount {
+			info.CentralHost = state.centralHost
+			info.CentralPath = state.centralPath
+			info.CentralSRTPort = state.centralSRTPort
+			if state.proxyPath != "" {
+				info.ProxyPath = state.proxyPath
+			}
+		} else {
+			info.CentralHost = ""
+			info.CentralPath = ""
+			info.CentralSRTPort = 0
+		}
+		infos = append(infos, info)
+	}
+	return infos
 }
 
 func (s *Supervisor) snapshotCameraInfos() []core.CameraInfo {
@@ -1041,4 +1112,71 @@ func (s *Supervisor) removeCameraInfo(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.cameras, key)
+}
+
+func (s *Supervisor) setUplinkState(key string, req uplink.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if state, ok := s.uplinkStates[key]; ok && uplinkStateMatches(state, req) {
+		state.startCount++
+		state.ttlSeconds = req.TTLSeconds
+		state.centralHost = req.CentralHost
+		state.centralPath = req.CentralPath
+		state.centralSRTPort = req.CentralSRTPort
+		if req.ProxyPath != "" {
+			state.proxyPath = req.ProxyPath
+		}
+		state.cameraID = req.CameraID
+		s.uplinkStates[key] = state
+		return
+	}
+
+	s.uplinkStates[key] = uplinkState{
+		cameraID:       req.CameraID,
+		proxyPath:      req.ProxyPath,
+		centralHost:    req.CentralHost,
+		centralPath:    req.CentralPath,
+		centralSRTPort: req.CentralSRTPort,
+		ttlSeconds:     req.TTLSeconds,
+		startCount:     1,
+		stopCount:      0,
+	}
+}
+
+func (s *Supervisor) maybeStopUplinkState(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state, ok := s.uplinkStates[key]
+	if !ok {
+		return
+	}
+	state.stopCount++
+	if state.stopCount >= state.startCount {
+		delete(s.uplinkStates, key)
+		return
+	}
+	s.uplinkStates[key] = state
+}
+
+func (s *Supervisor) clearUplinkState(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.uplinkStates, key)
+}
+
+func uplinkStateMatches(state uplinkState, req uplink.Request) bool {
+	return state.cameraID == req.CameraID &&
+		state.proxyPath == req.ProxyPath &&
+		state.centralHost == req.CentralHost &&
+		normalizeCentralPort(state.centralSRTPort) == normalizeCentralPort(req.CentralSRTPort) &&
+		state.centralPath == req.CentralPath
+}
+
+func normalizeCentralPort(port int) int {
+	if port <= 0 {
+		return 8890
+	}
+	return port
 }
