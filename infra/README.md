@@ -63,6 +63,31 @@ No modo `UPLINK_MODE=mediamtx`, o republish é feito pelo MediaMTX proxy usando
 - `UPLINK_FFMPEG_INPUT_ARGS`: argumentos antes do `-i` (aplicados ao input RTSP).
 - `UPLINK_FFMPEG_OUTPUT_ARGS`: argumentos antes da URL SRT (aplicados ao output).
 
+## Tuning SRT
+
+Os parâmetros SRT podem ser ajustados via variáveis de ambiente:
+
+- `UPLINK_SRT_PACKET_SIZE` (default: 1316)
+- `UPLINK_SRT_MAXBW` (bps, opcional)
+- `UPLINK_SRT_RCVBUF` (bytes, opcional)
+- `UPLINK_SRT_LATENCY` (ms, default: 200)
+
+Exemplo para link instável (prioriza tolerância a jitter):
+
+```bash
+UPLINK_SRT_LATENCY=400
+UPLINK_SRT_MAXBW=8000000
+UPLINK_SRT_RCVBUF=8388608
+```
+
+Exemplo para baixa latência (prioriza tempo de entrega):
+
+```bash
+UPLINK_SRT_LATENCY=80
+UPLINK_SRT_PACKET_SIZE=1316
+UPLINK_SRT_RCVBUF=2097152
+```
+
 Para habilitar:
 
 ```bash
