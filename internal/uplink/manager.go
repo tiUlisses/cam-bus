@@ -128,6 +128,10 @@ func (m *Manager) Start(req Request) error {
 func (m *Manager) Stop(req Request) error {
 	req = m.applyDefaults(req)
 	cameraKey := keyFor(req)
+	if m.isAlwaysOnRequest(req) {
+		log.Printf("[uplink] stop ignored for %s (always-on)", cameraKey)
+		return nil
+	}
 	return m.stopUplink(cameraKey, "stop command")
 }
 
