@@ -34,6 +34,7 @@ type Supervisor struct {
 	mu             sync.Mutex
 	cameras        map[string]core.CameraInfo
 	uplinkStates   map[string]uplinkState
+	uplinkStatus   map[string]uplink.Status
 	workers        map[string]*cameraWorker
 	statusInterval time.Duration
 	proc           *process.Process // <- NOVO: processo do cam-bus para métricas
@@ -152,6 +153,7 @@ func New(mqtt *mqttclient.Client, baseTopic string) *Supervisor {
 		mtxGen:         mediamtx.NewGeneratorFromEnv(),
 		cameras:        make(map[string]core.CameraInfo),
 		uplinkStates:   make(map[string]uplinkState),
+		uplinkStatus:   make(map[string]uplink.Status),
 		workers:        make(map[string]*cameraWorker),
 		statusInterval: statusInterval,
 		proc:           procHandle,
@@ -726,6 +728,9 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 		return
 	}
 	req.Normalize()
+	if strings.EqualFold(action, "status") && req.CameraID == "" {
+		req.CameraID = devID
+	}
 	if strings.EqualFold(action, "start") && req.CentralPath == "" {
 		if req.ProxyPath != "" {
 			req.CentralPath = strings.Trim(req.ProxyPath, "/")
@@ -773,6 +778,28 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 		}
 		s.maybeStopUplinkState(s.keyFor(info))
 		s.refreshMediaMTXConfig()
+	case "status":
+		info := core.CameraInfo{
+			Tenant:     tenant,
+			Building:   building,
+			Floor:      floor,
+			DeviceType: devType,
+			DeviceID:   devID,
+		}
+		status, ok := s.uplink.StatusFor(req)
+		if !ok {
+			status, ok = s.lastUplinkStatus(s.keyFor(info))
+		}
+		if !ok {
+			return
+		}
+		if status.CameraID == "" {
+			status.CameraID = req.CameraID
+		}
+		if status.CentralPath == "" {
+			status.CentralPath = req.CentralPath
+		}
+		s.handleUplinkStatus(status)
 	default:
 		log.Printf("[uplink] unknown uplink action: %s", action)
 	}
@@ -785,6 +812,7 @@ func (s *Supervisor) handleUplinkStatus(status uplink.Status) {
 			status.CameraID, status.CentralPath, status.ContainerName, status.State)
 		return
 	}
+	s.recordUplinkStatus(s.keyFor(info), status)
 	topic := s.uplinkStatusTopic(info)
 	payload, err := json.Marshal(status)
 	if err != nil {
@@ -799,6 +827,21 @@ func (s *Supervisor) handleUplinkStatus(status uplink.Status) {
 		s.clearUplinkState(key)
 		s.refreshMediaMTXConfig()
 	}
+}
+
+func (s *Supervisor) recordUplinkStatus(key string, status uplink.Status) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.uplinkStatus[key] = status
+}
+
+func (s *Supervisor) lastUplinkStatus(key string) (uplink.Status, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	status, ok := s.uplinkStatus[key]
+	return status, ok
 }
 
 func (s *Supervisor) findCameraInfoForUplinkStatus(status uplink.Status) (core.CameraInfo, bool) {

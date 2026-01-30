@@ -367,6 +367,42 @@ type uplinkSnapshot struct {
 	containerID string
 }
 
+func (m *Manager) StatusFor(req Request) (Status, bool) {
+	if m == nil {
+		return Status{}, false
+	}
+	req = m.applyDefaults(req)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, proc := range m.uplinks {
+		if req.CentralPath != "" && proc.payload.CentralPath == req.CentralPath {
+			return statusFromProcess(proc), true
+		}
+		if req.CameraID != "" && proc.payload.CameraID == req.CameraID {
+			return statusFromProcess(proc), true
+		}
+	}
+	return Status{}, false
+}
+
+func statusFromProcess(proc *uplinkProcess) Status {
+	state := strings.TrimSpace(proc.containerStatus)
+	if state == "" {
+		state = "running"
+	}
+	return Status{
+		CameraID:      proc.payload.CameraID,
+		CentralPath:   proc.payload.CentralPath,
+		ContainerName: proc.container,
+		State:         state,
+		ExitCode:      0,
+		Error:         "",
+		Timestamp:     time.Now().UTC(),
+	}
+}
+
 func (m *Manager) snapshotUplinks() []uplinkSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
