@@ -38,7 +38,19 @@ Quando `IGNORE_UPLINK=yes`, o cam-bus ignora comandos de start/stop e TTLs, trat
 Nesse modo, o supervisor garante `centralHost` e `centralPath` para todas as câmeras:
 
 - `centralHost` usa `UPLINK_CENTRAL_HOST` (quando presente).
-- `centralPath` é gerado a partir de `uplink.CentralPathFor(info)` quando vazio.
+- `centralPath` usa `DEFAULT_MEDIAMTXCENTRAL_PATH` quando definido (ex.: `central/base` + `proxyPath`).
+- `centralPath` também pode ser gerado a partir de `uplink.CentralPathFor(info)` quando vazio.
+
+### DEFAULT_MEDIAMTXCENTRAL_PATH
+
+Define o prefixo padrão do `centralPath` para câmeras always-on/ignore uplink. O sufixo é o
+`proxyPath` (ou `deviceId`, se vazio), evitando conflito de paths entre câmeras.
+
+Exemplo:
+
+```bash
+DEFAULT_MEDIAMTXCENTRAL_PATH="acme/hq"
+```
 
 Use este modo quando quiser que o uplink sempre permaneça ativo e o MediaMTX replique todas as câmeras automaticamente.
 

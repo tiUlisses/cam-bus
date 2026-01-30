@@ -30,6 +30,7 @@ const (
 type Manager struct {
 	proxyRTSPBase      string
 	defaultCentralHost string
+	defaultCentralPath string
 	defaultSRTPort     int
 	mode               string
 	containerManager   *container.Manager
@@ -70,6 +71,7 @@ func NewManagerFromEnv() *Manager {
 	manager := &Manager{
 		proxyRTSPBase:      strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/"),
 		defaultCentralHost: strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST")),
+		defaultCentralPath: strings.TrimSpace(os.Getenv("DEFAULT_MEDIAMTXCENTRAL_PATH")),
 		defaultSRTPort:     getenvInt("UPLINK_CENTRAL_SRT_PORT", defaultSRTPort),
 		mode:               normalizeMode(os.Getenv("UPLINK_MODE")),
 		containerManager:   container.NewManagerFromEnv(),
@@ -100,6 +102,13 @@ func (m *Manager) DefaultCentralHost() string {
 		return ""
 	}
 	return m.defaultCentralHost
+}
+
+func (m *Manager) DefaultCentralPath() string {
+	if m == nil {
+		return ""
+	}
+	return m.defaultCentralPath
 }
 
 func (r *Request) Normalize() {

@@ -98,6 +98,7 @@ type Generator struct {
 	httpClient         *http.Client
 	ignoreUplink       bool
 	defaultCentralHost string
+	defaultCentralPath string
 	mu                 sync.Mutex
 }
 
@@ -144,6 +145,7 @@ func NewGeneratorFromEnv() *Generator {
 	republishOnReady := uplinkMode == "mediamtx" || ignoreUplink
 	proxyRTSPBase := strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/")
 	defaultCentralHost := strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST"))
+	defaultCentralPath := strings.TrimSpace(os.Getenv("DEFAULT_MEDIAMTXCENTRAL_PATH"))
 
 	return &Generator{
 		path:               path,
@@ -160,6 +162,7 @@ func NewGeneratorFromEnv() *Generator {
 		httpClient:         &http.Client{Timeout: 5 * time.Second},
 		ignoreUplink:       ignoreUplink,
 		defaultCentralHost: defaultCentralHost,
+		defaultCentralPath: defaultCentralPath,
 	}
 }
 
@@ -176,7 +179,7 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	if err != nil {
 		return err
 	}
-	cfg := buildConfig(cameras, g.recordDeleteAfter, g.apiUser, g.apiPass, g.republishOnReady, g.proxyRTSPBase, g.ignoreUplink, g.defaultCentralHost)
+	cfg := buildConfig(cameras, g.recordDeleteAfter, g.apiUser, g.apiPass, g.republishOnReady, g.proxyRTSPBase, g.ignoreUplink, g.defaultCentralHost, g.defaultCentralPath)
 	if g.apiUser == "" && g.apiPass == "" {
 		cfg.AuthInternalUsers = existing.AuthInternalUsers
 	}
@@ -199,7 +202,7 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	return nil
 }
 
-func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, apiPass string, republishOnReady bool, proxyRTSPBase string, ignoreUplink bool, defaultCentralHost string) Config {
+func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, apiPass string, republishOnReady bool, proxyRTSPBase string, ignoreUplink bool, defaultCentralHost, defaultCentralPath string) Config {
 	cfg := Config{
 		RTSPAddress:       ":8554",
 		HLS:               false,
@@ -222,6 +225,9 @@ func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, ap
 		if ignoreUplink {
 			if info.CentralHost == "" {
 				info.CentralHost = defaultCentralHost
+			}
+			if info.CentralPath == "" && defaultCentralPath != "" {
+				info.CentralPath = uplink.DefaultCentralPath(defaultCentralPath, info)
 			}
 			if info.CentralPath == "" {
 				info.CentralPath = uplink.CentralPathFor(info)
