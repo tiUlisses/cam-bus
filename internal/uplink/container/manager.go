@@ -26,6 +26,7 @@ var (
 		"-fflags", "+nobuffer",
 		"-rtsp_transport", "tcp",
 		"-rw_timeout", "15000000",
+		"-stimeout", "15000000",
 	}
 	defaultFFmpegOutputArgs = []string{
 		"-c", "copy",
@@ -159,10 +160,12 @@ func normalizeInputArgs(proxyURL string, inputArgs []string) []string {
 	case "file":
 		args = prependIfMissing(args, "-re")
 		args = removeOptionWithValue(args, "-rtsp_transport")
+		args = removeOptionWithValue(args, "-stimeout")
 	case "rtsp":
 		// keep args
 	default:
 		args = removeOptionWithValue(args, "-rtsp_transport")
+		args = removeOptionWithValue(args, "-stimeout")
 	}
 	return args
 }
