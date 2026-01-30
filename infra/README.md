@@ -82,9 +82,9 @@ Requisitos de conectividade:
 ## Tuning SRT
 
 Os parâmetros SRT podem ser ajustados via variáveis de ambiente. Quando não há
-configuração explícita, o cam-bus tenta automaticamente mais de um perfil de
-parâmetros (ex.: defaults e um perfil de compatibilidade com maior tolerância a
-jitter) ao iniciar o uplink, tentando reduzir falhas de handshake.
+configuração explícita, o cam-bus usa apenas o perfil padrão. Se precisar de
+uma tentativa extra com parâmetros de compatibilidade (maior tolerância a
+jitter), habilite `UPLINK_SRT_COMPAT_PROFILE=true`.
 
 - `UPLINK_SRT_PACKET_SIZE` (default: 1316)
 - `UPLINK_SRT_MAXBW` (bps, opcional)
@@ -100,6 +100,7 @@ jitter) ao iniciar o uplink, tentando reduzir falhas de handshake.
 - `UPLINK_SRT_PASSPHRASE` (string, opcional)
 - `UPLINK_SRT_PBKEYLEN` (bits: 16/24/32, opcional)
 - `UPLINK_SRT_EXTRA_PARAMS` (query string extra, opcional)
+- `UPLINK_SRT_COMPAT_PROFILE` (`true`/`false`, opcional, default: `false`)
 
 Exemplo para link instável (prioriza tolerância a jitter):
 

@@ -109,6 +109,11 @@ func srtOptionCandidates(base SRTQueryOptions) []SRTQueryOptions {
 		candidates = append(candidates, defaultLatency)
 	}
 
+	compatEnabled := getenvBool("UPLINK_SRT_COMPAT_PROFILE", false)
+	if !compatEnabled {
+		return candidates
+	}
+
 	compat := stripped
 	compat.Latency = 80
 	compat.PeerLatency = 500
