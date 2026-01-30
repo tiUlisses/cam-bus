@@ -26,10 +26,11 @@ type Supervisor struct {
 	mqtt      *mqttclient.Client
 	baseTopic string
 
-	shard   string
-	engines *engines.Manager
-	uplink  *uplink.Manager
-	mtxGen  *mediamtx.Generator
+	shard         string
+	engines       *engines.Manager
+	uplink        *uplink.Manager
+	mtxGen        *mediamtx.Generator
+	mtxCentralGen *mediamtx.Generator
 
 	mu             sync.Mutex
 	cameras        map[string]core.CameraInfo
@@ -151,6 +152,7 @@ func New(mqtt *mqttclient.Client, baseTopic string) *Supervisor {
 		engines:        eng,
 		uplink:         uplinkManager,
 		mtxGen:         mediamtx.NewGeneratorFromEnv(),
+		mtxCentralGen:  mediamtx.NewCentralGeneratorFromEnv(),
 		cameras:        make(map[string]core.CameraInfo),
 		uplinkStates:   make(map[string]uplinkState),
 		uplinkStatus:   make(map[string]uplink.Status),
@@ -1131,13 +1133,17 @@ func (s *Supervisor) cleanupCamera(info core.CameraInfo) {
 }
 
 func (s *Supervisor) refreshMediaMTXConfig() {
-	if s.mtxGen == nil {
-		return
+	if s.mtxGen != nil {
+		infos := s.snapshotCameraInfosForMediaMTX()
+		if err := s.mtxGen.Sync(infos); err != nil {
+			log.Printf("[supervisor] erro ao atualizar config do MediaMTX: %v", err)
+		}
 	}
-
-	infos := s.snapshotCameraInfosForMediaMTX()
-	if err := s.mtxGen.Sync(infos); err != nil {
-		log.Printf("[supervisor] erro ao atualizar config do MediaMTX: %v", err)
+	if s.mtxCentralGen != nil {
+		infos := s.snapshotCameraInfosForCentralMediaMTX()
+		if err := s.mtxCentralGen.Sync(infos); err != nil {
+			log.Printf("[supervisor] erro ao atualizar config do MediaMTX central: %v", err)
+		}
 	}
 }
 
@@ -1165,6 +1171,35 @@ func (s *Supervisor) snapshotCameraInfosForMediaMTX() []core.CameraInfo {
 			info.CentralHost = ""
 			info.CentralPath = ""
 			info.CentralSRTPort = 0
+		}
+		infos = append(infos, info)
+	}
+	return infos
+}
+
+func (s *Supervisor) snapshotCameraInfosForCentralMediaMTX() []core.CameraInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	infos := make([]core.CameraInfo, 0, len(s.cameras))
+	for key, info := range s.cameras {
+		state, ok := s.uplinkStates[key]
+		if (!ok || state.startCount <= state.stopCount) && len(s.uplinkStates) > 0 {
+			if fallback, found := s.findUplinkStateForCameraLocked(info); found {
+				state = fallback
+				ok = true
+			}
+		}
+		if ok && state.startCount > state.stopCount {
+			if state.centralPath != "" {
+				info.CentralPath = state.centralPath
+			}
+			if state.proxyPath != "" {
+				info.ProxyPath = state.proxyPath
+			}
+		}
+		if info.CentralPath == "" {
+			info.CentralPath = uplink.CentralPathFor(info)
 		}
 		infos = append(infos, info)
 	}
