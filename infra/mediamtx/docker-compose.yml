@@ -2,10 +2,7 @@ version: "3.9"
 
 services:
   mtx-proxy:
-    build:
-      context: .
-      dockerfile: ./proxy/Dockerfile
-    image: cam-bus/mtx-proxy:latest
+    image: bluenviron/mediamtx:latest-ffmpeg
     container_name: mtx-proxy
     volumes:
       - ./proxy/mediamtx.yml:/mediamtx.yml:rw
@@ -17,22 +14,22 @@ services:
       - "9997:9997"   # API (reload config)
     networks: [mtxnet]
 
-  mtx-central:
-    image: bluenviron/mediamtx:latest
-    container_name: mtx-central
-    volumes:
-      - ./central/mediamtx.yml:/mediamtx.yml:rw
-    ports:
-      - "8888:8888"          # HLS
-      - "8889:8889"          # WebRTC (HTTP signaling)
-      - "8189:8189/udp"      # WebRTC (ICE/UDP)
-      - "8890:8890/udp"    # SRT
-    environment:
+#  mtx-central:
+#    image: bluenviron/mediamtx:latest
+#    container_name: mtx-central
+#    volumes:
+#      - ./central/mediamtx.yml:/mediamtx.yml:rw
+#    ports:
+#      - "8888:8888"          # HLS
+#      - "8889:8889"          # WebRTC (HTTP signaling)
+#      - "8189:8189/udp"      # WebRTC (ICE/UDP)
+#      - "8890:8890/udp"    # SRT
+#    environment:
       # MUITO IMPORTANTE: o WebRTC precisa anunciar um host que o browser alcance.
       # Em LAN: IP do host (ex: 192.168.0.10). Em cloud: domínio público.
-      - MTX_WEBRTCADDITIONALHOSTS=${WEBRTC_ADDITIONAL_HOSTS:-localhost}
-    networks: [mtxnet]
-    depends_on: [mtx-proxy]
+#      - MTX_WEBRTCADDITIONALHOSTS=${WEBRTC_ADDITIONAL_HOSTS:-localhost}
+#    networks: [mtxnet]
+#    depends_on: [mtx-proxy]
 
 networks:
   mtxnet:
