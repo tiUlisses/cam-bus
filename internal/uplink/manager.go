@@ -67,15 +67,27 @@ type Request struct {
 
 func NewManagerFromEnv() *Manager {
 	alwaysOnPaths := parseListEnv(os.Getenv("UPLINK_ALWAYS_ON_PATHS"))
+	alwaysOn := getenvBool("UPLINK_ALWAYS_ON", false)
+	defaultCentralHost := strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST"))
+	defaultSRTPort := getenvInt("UPLINK_CENTRAL_SRT_PORT", defaultSRTPort)
+	if alwaysOn && defaultCentralHost == "" {
+		centralHost, centralPort := parseCentralURL(os.Getenv("MEDIAMTX_CENTRAL_URL"))
+		if centralHost != "" {
+			defaultCentralHost = centralHost
+		}
+		if centralPort > 0 {
+			defaultSRTPort = centralPort
+		}
+	}
 	manager := &Manager{
 		proxyRTSPBase:      strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/"),
-		defaultCentralHost: strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST")),
-		defaultSRTPort:     getenvInt("UPLINK_CENTRAL_SRT_PORT", defaultSRTPort),
+		defaultCentralHost: defaultCentralHost,
+		defaultSRTPort:     defaultSRTPort,
 		mode:               normalizeMode(os.Getenv("UPLINK_MODE")),
 		containerManager:   container.NewManagerFromEnv(),
 		reconcileInterval:  time.Duration(getenvInt("UPLINK_RECONCILE_INTERVAL_SECONDS", defaultReconcileSecs)) * time.Second,
 		reconcileStop:      make(chan struct{}),
-		alwaysOn:           getenvBool("UPLINK_ALWAYS_ON", false),
+		alwaysOn:           alwaysOn,
 		alwaysOnPaths:      alwaysOnPaths,
 		ignoreUplink:       getenvBool("IGNORE_UPLINK", false),
 		uplinks:            make(map[string]*uplinkProcess),
@@ -136,7 +148,7 @@ func (m *Manager) Stop(req Request) error {
 }
 
 func (m *Manager) StopByCamera(info core.CameraInfo) {
-	if m == nil || m.ignoreUplink {
+	if m == nil || m.ignoreUplink || m.alwaysOn {
 		return
 	}
 	candidates := make(map[string]struct{})
@@ -667,6 +679,32 @@ func parseListEnv(raw string) map[string]struct{} {
 		out[key] = struct{}{}
 	}
 	return out
+}
+
+func parseCentralURL(raw string) (string, int) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", 0
+	}
+	parsed := raw
+	if !strings.Contains(raw, "://") {
+		parsed = "srt://" + raw
+	}
+	u, err := url.Parse(parsed)
+	if err != nil {
+		return "", 0
+	}
+	host := strings.TrimSpace(u.Hostname())
+	if host == "" {
+		return "", 0
+	}
+	if port := strings.TrimSpace(u.Port()); port != "" {
+		var parsedPort int
+		if _, err := fmt.Sscanf(port, "%d", &parsedPort); err == nil && parsedPort > 0 {
+			return host, parsedPort
+		}
+	}
+	return host, 0
 }
 
 func normalizeAlwaysOnKey(raw string) string {
