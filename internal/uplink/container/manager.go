@@ -105,6 +105,16 @@ func (m *Manager) Start(ctx context.Context, req Request) (string, error) {
 		}
 		return "", retryErr
 	}
+	if strings.Contains(logsOut, "Option stimeout not found.") {
+		log.Printf("ffmpeg in %q does not support -stimeout; retrying without it", m.image)
+		fallbackInputArgs := removeOptionWithValue(m.ffmpegInputArgs, "-stimeout")
+		_, _ = m.run(ctx, "rm", "-f", req.Name)
+		containerID, _, retryErr := m.startContainer(ctx, req, fallbackInputArgs)
+		if retryErr == nil {
+			return containerID, nil
+		}
+		return "", retryErr
+	}
 	return "", err
 }
 
