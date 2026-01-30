@@ -42,7 +42,7 @@ No modo `UPLINK_MODE=mediamtx`, o republish é feito pelo MediaMTX proxy usando
 `mediamtx.yml` do proxy com:
 
 - `record: yes` herdado de `pathDefaults` (ex.: `infra/mediamtx/proxy/mediamtx.yml`);
-- `sourceOnDemand: yes` para só republish quando a fonte estiver pronta;
+- `sourceOnDemand: no` para o proxy conectar na origem e disparar `runOnReady`;
 - `runOnReady` chamando FFmpeg com `-c copy` e `streamid=publish:<centralPath>`.
 
 Para habilitar:

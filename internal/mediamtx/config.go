@@ -264,7 +264,6 @@ func pathConfigFor(info core.CameraInfo, rtspURL string, defaultRetention time.D
 	}
 
 	if republishOnReady && info.CentralHost != "" && info.CentralPath != "" {
-		cfg.SourceOnDemand = true
 		cfg.RunOnReady = buildRepublishCommand(proxyRTSPBase, info)
 		cfg.RunOnReadyRestart = true
 	}
