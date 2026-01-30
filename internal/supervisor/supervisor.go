@@ -674,6 +674,23 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 
 	s.upsertCameraInfo(key, info)
 
+	if state, ok := s.activeUplinkState(key); ok {
+		if state.centralHost != "" {
+			info.CentralHost = state.centralHost
+		}
+		if state.centralPath != "" {
+			info.CentralPath = state.centralPath
+		}
+		if state.centralSRTPort > 0 {
+			info.CentralSRTPort = state.centralSRTPort
+		}
+		if state.proxyPath != "" {
+			info.ProxyPath = state.proxyPath
+		}
+		s.upsertCameraInfo(key, info)
+		s.refreshMediaMTXConfig()
+	}
+
 	if s.uplink != nil && s.uplink.AlwaysOnEnabled(info) {
 		if strings.TrimSpace(info.CentralHost) != "" {
 			req := uplink.Request{
@@ -1162,6 +1179,16 @@ func (s *Supervisor) upsertCameraInfo(key string, info core.CameraInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cameras[key] = info
+}
+
+func (s *Supervisor) activeUplinkState(key string) (uplinkState, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.uplinkStates[key]
+	if !ok || state.startCount <= state.stopCount {
+		return uplinkState{}, false
+	}
+	return state, true
 }
 
 func (s *Supervisor) removeCameraInfo(key string) {
