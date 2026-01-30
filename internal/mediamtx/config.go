@@ -26,9 +26,6 @@ import (
 const (
 	maxRecordDeleteAfter = 10 * time.Minute
 	defaultProxyRTSPBase = "rtsp://localhost:8554"
-	defaultSRTPacketSize = 1316
-	defaultSRTPort       = 8890
-	defaultSRTLatencyMS  = 200
 )
 
 var (
@@ -430,107 +427,48 @@ func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
 		proxyPath = strings.Trim(strings.TrimSpace(info.DeviceID), "/")
 	}
 	proxyURL := fmt.Sprintf("%s/%s", strings.TrimSuffix(proxyRTSPBase, "/"), proxyPath)
-	srtURL := buildSRTURL(info.CentralHost, info.CentralSRTPort, info.CentralPath)
+	srtURLs := uplink.BuildSRTURLCandidates(info.CentralHost, info.CentralSRTPort, info.CentralPath)
 	globalArgs := parseArgsEnv("UPLINK_FFMPEG_GLOBAL_ARGS", defaultFFmpegGlobalArgs)
 	inputArgs := parseArgsEnv("UPLINK_FFMPEG_INPUT_ARGS", defaultFFmpegInputArgs)
 	outputArgs := parseArgsEnv("UPLINK_FFMPEG_OUTPUT_ARGS", defaultFFmpegOutputArgs)
 
-	args := []string{"ffmpeg"}
-	args = append(args, globalArgs...)
-	args = append(args, inputArgs...)
-	args = append(args, "-i", proxyURL)
-	args = append(args, outputArgs...)
-	args = append(args, srtURL)
-	return strings.Join(args, " ")
+	baseArgs := []string{"ffmpeg"}
+	baseArgs = append(baseArgs, globalArgs...)
+	baseArgs = append(baseArgs, inputArgs...)
+	baseArgs = append(baseArgs, "-i", proxyURL)
+	baseArgs = append(baseArgs, outputArgs...)
+
+	if len(srtURLs) == 0 {
+		srtURLs = []string{""}
+	}
+	if len(srtURLs) == 1 {
+		args := append(baseArgs, srtURLs[0])
+		return strings.Join(args, " ")
+	}
+
+	commands := make([]string, 0, len(srtURLs))
+	for _, srtURL := range srtURLs {
+		args := append([]string{}, baseArgs...)
+		args = append(args, srtURL)
+		commands = append(commands, shellQuoteArgs(args))
+	}
+	return fmt.Sprintf("sh -c %s", shellQuote(strings.Join(commands, " || ")))
 }
 
-func buildSRTURL(host string, port int, path string) string {
-	if port <= 0 {
-		port = defaultSRTPort
+func shellQuoteArgs(args []string) string {
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
 	}
-	streamID := fmt.Sprintf("publish:%s", path)
-	latency := getenvInt("UPLINK_SRT_LATENCY", defaultSRTLatencyMS)
-	packetSize := getenvInt("UPLINK_SRT_PACKET_SIZE", defaultSRTPacketSize)
-	maxBW := getenvInt("UPLINK_SRT_MAXBW", 0)
-	rcvBuf := getenvInt("UPLINK_SRT_RCVBUF", 0)
-	queryValues := url.Values{}
-	queryValues.Set("streamid", streamID)
-	queryValues.Set("mode", "caller")
-	queryValues.Set("transtype", "live")
-	if packetSize > 0 {
-		queryValues.Set("pkt_size", fmt.Sprintf("%d", packetSize))
-	}
-	if latency > 0 {
-		queryValues.Set("latency", fmt.Sprintf("%d", latency))
-	}
-	if maxBW > 0 {
-		queryValues.Set("maxbw", fmt.Sprintf("%d", maxBW))
-	}
-	if rcvBuf > 0 {
-		queryValues.Set("rcvbuf", fmt.Sprintf("%d", rcvBuf))
-	}
-	applySRTQueryOptions(queryValues)
-
-	u := url.URL{
-		Scheme:   "srt",
-		Host:     fmt.Sprintf("%s:%d", host, port),
-		RawQuery: queryValues.Encode(),
-	}
-	return u.String()
+	return strings.Join(quoted, " ")
 }
 
-func applySRTQueryOptions(queryValues url.Values) {
-	passphrase := strings.TrimSpace(os.Getenv("UPLINK_SRT_PASSPHRASE"))
-	if passphrase != "" {
-		queryValues.Set("passphrase", passphrase)
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
 	}
-	pbkeylen := getenvInt("UPLINK_SRT_PBKEYLEN", 0)
-	if pbkeylen > 0 {
-		queryValues.Set("pbkeylen", fmt.Sprintf("%d", pbkeylen))
-	}
-	peerLatency := getenvInt("UPLINK_SRT_PEERLATENCY", 0)
-	if peerLatency > 0 {
-		queryValues.Set("peerlatency", fmt.Sprintf("%d", peerLatency))
-	}
-	rcvLatency := getenvInt("UPLINK_SRT_RCVLATENCY", 0)
-	if rcvLatency > 0 {
-		queryValues.Set("rcvlatency", fmt.Sprintf("%d", rcvLatency))
-	}
-	connTimeout := getenvInt("UPLINK_SRT_CONNTIMEO", 0)
-	if connTimeout > 0 {
-		queryValues.Set("conntimeo", fmt.Sprintf("%d", connTimeout))
-	}
-	sndBuf := getenvInt("UPLINK_SRT_SNDBUF", 0)
-	if sndBuf > 0 {
-		queryValues.Set("sndbuf", fmt.Sprintf("%d", sndBuf))
-	}
-	inputBW := getenvInt("UPLINK_SRT_INPUTBW", 0)
-	if inputBW > 0 {
-		queryValues.Set("inputbw", fmt.Sprintf("%d", inputBW))
-	}
-	oheadBW := getenvInt("UPLINK_SRT_OHEADBW", 0)
-	if oheadBW > 0 {
-		queryValues.Set("oheadbw", fmt.Sprintf("%d", oheadBW))
-	}
-	if getenvBool("UPLINK_SRT_TLPKTDROP", false) {
-		queryValues.Set("tlpktdrop", "1")
-	}
-	extra := strings.TrimSpace(os.Getenv("UPLINK_SRT_EXTRA_PARAMS"))
-	if extra == "" {
-		return
-	}
-	parsed, err := url.ParseQuery(extra)
-	if err != nil {
-		log.Printf("[mediamtx] parâmetros SRT inválidos em UPLINK_SRT_EXTRA_PARAMS=%q: %v", extra, err)
-		return
-	}
-	for key, values := range parsed {
-		if len(values) == 0 {
-			queryValues.Set(key, "")
-			continue
-		}
-		queryValues.Set(key, values[len(values)-1])
-	}
+	escaped := strings.ReplaceAll(value, "'", "'\"'\"'")
+	return "'" + escaped + "'"
 }
 
 func retentionForCamera(info core.CameraInfo, defaultRetention time.Duration) time.Duration {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -280,10 +279,14 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	}
 
 	proxyURL := fmt.Sprintf("%s/%s", m.proxyRTSPBase, strings.TrimPrefix(req.ProxyPath, "/"))
-	srtURL := buildSRTURL(req.CentralHost, req.CentralSRTPort, req.CentralPath)
+	srtCandidates := BuildSRTURLCandidates(req.CentralHost, req.CentralSRTPort, req.CentralPath)
 	containerName := container.NameForCentralPath(req.CentralPath)
 
 	if m.mode == uplinkModeMediaMTX || m.mode == uplinkModeCentralPull {
+		srtURL := ""
+		if len(srtCandidates) > 0 {
+			srtURL = srtCandidates[0]
+		}
 		containerName := "mediamtx-proxy"
 		if m.mode == uplinkModeCentralPull {
 			containerName = "central-pull"
@@ -314,17 +317,39 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	}
 
 	startCtx := context.Background()
-	containerID, err := m.containerManager.Start(startCtx, container.Request{
-		Name:     containerName,
-		ProxyURL: proxyURL,
-		SRTURL:   srtURL,
-	})
-	if err != nil {
-		log.Printf("[uplink] docker run failed for %s (container=%s): %v", cameraKey, containerName, err)
-		statusError := err.Error()
-		var startErr *container.StartError
-		if errors.As(err, &startErr) && startErr.Kind == container.StartErrorKindUnsupportedOption && startErr.Summary != "" {
-			statusError = startErr.Summary
+	if len(srtCandidates) == 0 {
+		srtCandidates = []string{""}
+	}
+	var (
+		containerID string
+		startErr    error
+		usedSRTURL  string
+	)
+	for idx, srtURL := range srtCandidates {
+		if srtURL == "" {
+			startErr = fmt.Errorf("srt url required")
+			break
+		}
+		containerID, startErr = m.containerManager.Start(startCtx, container.Request{
+			Name:     containerName,
+			ProxyURL: proxyURL,
+			SRTURL:   srtURL,
+		})
+		if startErr == nil {
+			usedSRTURL = srtURL
+			break
+		}
+		if !isRetriableStartError(startErr) || idx == len(srtCandidates)-1 {
+			break
+		}
+		log.Printf("[uplink] retrying SRT params for %s (attempt %d/%d)", cameraKey, idx+2, len(srtCandidates))
+	}
+	if startErr != nil {
+		log.Printf("[uplink] docker run failed for %s (container=%s): %v", cameraKey, containerName, startErr)
+		statusError := startErr.Error()
+		var startKind *container.StartError
+		if errors.As(startErr, &startKind) && startKind.Kind == container.StartErrorKindUnsupportedOption && startKind.Summary != "" {
+			statusError = startKind.Summary
 		}
 		m.notifyStatus(Status{
 			CameraID:      req.CameraID,
@@ -334,7 +359,7 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 			ExitCode:      0,
 			Error:         statusError,
 		})
-		return fmt.Errorf("start container uplink: %w", err)
+		return fmt.Errorf("start container uplink: %w", startErr)
 	}
 
 	proc := &uplinkProcess{
@@ -350,7 +375,7 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	m.uplinks[cameraKey] = proc
 	m.refreshTTL(proc, req.TTLSeconds)
 
-	log.Printf("[uplink] started for %s -> %s (startCount=%d stopCount=%d)", cameraKey, srtURL, proc.startCount, proc.stopCount)
+	log.Printf("[uplink] started for %s -> %s (startCount=%d stopCount=%d)", cameraKey, usedSRTURL, proc.startCount, proc.stopCount)
 	m.notifyStatus(Status{
 		CameraID:      req.CameraID,
 		CentralPath:   req.CentralPath,
@@ -634,92 +659,16 @@ func normalizePort(port int) int {
 	return port
 }
 
-func buildSRTURL(host string, port int, path string) string {
-	if port <= 0 {
-		port = defaultSRTPort
+func isRetriableStartError(err error) bool {
+	var startErr *container.StartError
+	if !errors.As(err, &startErr) {
+		return false
 	}
-	streamID := fmt.Sprintf("publish:%s", path)
-	latency := getenvInt("UPLINK_SRT_LATENCY", defaultSRTLatencyMS)
-	packetSize := getenvInt("UPLINK_SRT_PACKET_SIZE", defaultSRTPacketSize)
-	maxBW := getenvInt("UPLINK_SRT_MAXBW", 0)
-	rcvBuf := getenvInt("UPLINK_SRT_RCVBUF", 0)
-	queryValues := url.Values{}
-	queryValues.Set("streamid", streamID)
-	queryValues.Set("mode", "caller")
-	queryValues.Set("transtype", "live")
-	if packetSize > 0 {
-		queryValues.Set("pkt_size", fmt.Sprintf("%d", packetSize))
-	}
-	if latency > 0 {
-		queryValues.Set("latency", fmt.Sprintf("%d", latency))
-	}
-	if maxBW > 0 {
-		queryValues.Set("maxbw", fmt.Sprintf("%d", maxBW))
-	}
-	if rcvBuf > 0 {
-		queryValues.Set("rcvbuf", fmt.Sprintf("%d", rcvBuf))
-	}
-	applySRTQueryOptions(queryValues)
-
-	u := url.URL{
-		Scheme:   "srt",
-		Host:     fmt.Sprintf("%s:%d", host, port),
-		RawQuery: queryValues.Encode(),
-	}
-	return u.String()
-}
-
-func applySRTQueryOptions(queryValues url.Values) {
-	passphrase := strings.TrimSpace(os.Getenv("UPLINK_SRT_PASSPHRASE"))
-	if passphrase != "" {
-		queryValues.Set("passphrase", passphrase)
-	}
-	pbkeylen := getenvInt("UPLINK_SRT_PBKEYLEN", 0)
-	if pbkeylen > 0 {
-		queryValues.Set("pbkeylen", fmt.Sprintf("%d", pbkeylen))
-	}
-	peerLatency := getenvInt("UPLINK_SRT_PEERLATENCY", 0)
-	if peerLatency > 0 {
-		queryValues.Set("peerlatency", fmt.Sprintf("%d", peerLatency))
-	}
-	rcvLatency := getenvInt("UPLINK_SRT_RCVLATENCY", 0)
-	if rcvLatency > 0 {
-		queryValues.Set("rcvlatency", fmt.Sprintf("%d", rcvLatency))
-	}
-	connTimeout := getenvInt("UPLINK_SRT_CONNTIMEO", 0)
-	if connTimeout > 0 {
-		queryValues.Set("conntimeo", fmt.Sprintf("%d", connTimeout))
-	}
-	sndBuf := getenvInt("UPLINK_SRT_SNDBUF", 0)
-	if sndBuf > 0 {
-		queryValues.Set("sndbuf", fmt.Sprintf("%d", sndBuf))
-	}
-	inputBW := getenvInt("UPLINK_SRT_INPUTBW", 0)
-	if inputBW > 0 {
-		queryValues.Set("inputbw", fmt.Sprintf("%d", inputBW))
-	}
-	oheadBW := getenvInt("UPLINK_SRT_OHEADBW", 0)
-	if oheadBW > 0 {
-		queryValues.Set("oheadbw", fmt.Sprintf("%d", oheadBW))
-	}
-	if getenvBool("UPLINK_SRT_TLPKTDROP", false) {
-		queryValues.Set("tlpktdrop", "1")
-	}
-	extra := strings.TrimSpace(os.Getenv("UPLINK_SRT_EXTRA_PARAMS"))
-	if extra == "" {
-		return
-	}
-	parsed, err := url.ParseQuery(extra)
-	if err != nil {
-		log.Printf("[uplink] parâmetros SRT inválidos em UPLINK_SRT_EXTRA_PARAMS=%q: %v", extra, err)
-		return
-	}
-	for key, values := range parsed {
-		if len(values) == 0 {
-			queryValues.Set(key, "")
-			continue
-		}
-		queryValues.Set(key, values[len(values)-1])
+	switch startErr.Kind {
+	case container.StartErrorKindNetworkFailure, container.StartErrorKindUnknown:
+		return true
+	default:
+		return false
 	}
 }
 
