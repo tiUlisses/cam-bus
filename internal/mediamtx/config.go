@@ -114,6 +114,9 @@ type Generator struct {
 	httpClient         *http.Client
 	ignoreUplink       bool
 	defaultCentralHost string
+	useCentralPaths    bool
+	sourceFromProxy    bool
+	preserveDefaults   bool
 	mu                 sync.Mutex
 }
 
@@ -179,6 +182,68 @@ func NewGeneratorFromEnv() *Generator {
 	}
 }
 
+// NewCentralGeneratorFromEnv cria o gerador do MediaMTX central para RTSP pull via proxy.
+// MTX_CENTRAL_CONFIG_PATH (obrigatório) define o destino do YAML.
+// MTX_CENTRAL_RELOAD_PID ou MTX_CENTRAL_PID definem o PID para SIGHUP.
+// MTX_CENTRAL_RELOAD_URL define a base HTTP da API do MediaMTX (ex.: http://mtx-central:9997).
+// MTX_CENTRAL_RELOAD_USER/MTX_CENTRAL_RELOAD_PASS ou MTX_CENTRAL_RELOAD_TOKEN definem credenciais para reload HTTP.
+// MTX_CENTRAL_API_USER/MTX_CENTRAL_API_PASS configuram authInternalUsers no YAML gerado.
+// MTX_CENTRAL_API_TOKEN (legado) pode ser usado como fallback para o reload token.
+// MTX_CENTRAL_RECORD_DELETE_AFTER (opcional) ajusta a retenção, limitada a 10m.
+func NewCentralGeneratorFromEnv() *Generator {
+	path := strings.TrimSpace(os.Getenv("MTX_CENTRAL_CONFIG_PATH"))
+	if path == "" {
+		return nil
+	}
+
+	apiBaseURL := normalizeAPIBaseURL(os.Getenv("MTX_CENTRAL_RELOAD_URL"))
+	reloadPID := parsePIDEnv("MTX_CENTRAL_RELOAD_PID")
+	if reloadPID == 0 {
+		reloadPID = parsePIDEnv("MTX_CENTRAL_PID")
+	}
+
+	reloadUser := strings.TrimSpace(os.Getenv("MTX_CENTRAL_RELOAD_USER"))
+	reloadPass := strings.TrimSpace(os.Getenv("MTX_CENTRAL_RELOAD_PASS"))
+	reloadToken := strings.TrimSpace(os.Getenv("MTX_CENTRAL_RELOAD_TOKEN"))
+	apiUser := strings.TrimSpace(os.Getenv("MTX_CENTRAL_API_USER"))
+	apiPass := strings.TrimSpace(os.Getenv("MTX_CENTRAL_API_PASS"))
+	apiToken := strings.TrimSpace(os.Getenv("MTX_CENTRAL_API_TOKEN"))
+	if reloadUser == "" && reloadPass == "" && reloadToken == "" {
+		reloadUser = apiUser
+		reloadPass = apiPass
+		reloadToken = apiToken
+	}
+
+	retention := parseDurationEnv("MTX_CENTRAL_RECORD_DELETE_AFTER", maxRecordDeleteAfter)
+	if retention > maxRecordDeleteAfter {
+		retention = maxRecordDeleteAfter
+	}
+
+	ignoreUplink := getenvBool("IGNORE_UPLINK", false)
+	proxyRTSPBase := strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/")
+	defaultCentralHost := strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST"))
+
+	return &Generator{
+		path:               path,
+		reloadPID:          reloadPID,
+		apiBaseURL:         apiBaseURL,
+		reloadAuthUser:     reloadUser,
+		reloadAuthPass:     reloadPass,
+		reloadAuthToken:    reloadToken,
+		apiUser:            apiUser,
+		apiPass:            apiPass,
+		recordDeleteAfter:  retention,
+		republishOnReady:   false,
+		proxyRTSPBase:      proxyRTSPBase,
+		httpClient:         &http.Client{Timeout: 5 * time.Second},
+		ignoreUplink:       ignoreUplink,
+		defaultCentralHost: defaultCentralHost,
+		useCentralPaths:    true,
+		sourceFromProxy:    true,
+		preserveDefaults:   true,
+	}
+}
+
 // Sync escreve a config e aplica reload quando necessário.
 func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	if g == nil || g.path == "" {
@@ -192,10 +257,7 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	if err != nil {
 		return err
 	}
-	cfg := buildConfig(cameras, g.recordDeleteAfter, g.apiUser, g.apiPass, g.republishOnReady, g.proxyRTSPBase, g.ignoreUplink, g.defaultCentralHost)
-	if g.apiUser == "" && g.apiPass == "" {
-		cfg.AuthInternalUsers = existing.AuthInternalUsers
-	}
+	cfg := g.buildConfig(existing, exists, cameras)
 	if exists && reflect.DeepEqual(existing, cfg) {
 		return nil
 	}
@@ -215,8 +277,8 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	return nil
 }
 
-func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, apiPass string, republishOnReady bool, proxyRTSPBase string, ignoreUplink bool, defaultCentralHost string) Config {
-	cfg := Config{
+func baseConfig(retention time.Duration, apiUser, apiPass string) Config {
+	return Config{
 		RTSPAddress:       ":8554",
 		HLS:               false,
 		WebRTC:            false,
@@ -233,34 +295,83 @@ func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, ap
 		},
 		Paths: make(map[string]PathConfig),
 	}
+}
 
+func (g *Generator) buildConfig(existing Config, exists bool, cameras []core.CameraInfo) Config {
+	var cfg Config
+	if g.preserveDefaults && exists {
+		cfg = existing
+		cfg.Paths = make(map[string]PathConfig)
+		if g.apiUser != "" || g.apiPass != "" {
+			cfg.AuthInternalUsers = authUsersForAPI(g.apiUser, g.apiPass)
+		}
+		if cfg.PathDefaults.RecordDeleteAfter == "" {
+			cfg.PathDefaults.RecordDeleteAfter = formatDuration(g.recordDeleteAfter)
+		}
+	} else {
+		cfg = baseConfig(g.recordDeleteAfter, g.apiUser, g.apiPass)
+		if exists && g.apiUser == "" && g.apiPass == "" {
+			cfg.AuthInternalUsers = existing.AuthInternalUsers
+		}
+	}
 	for _, info := range cameras {
-		if ignoreUplink {
+		if g.ignoreUplink {
 			if info.CentralHost == "" {
-				info.CentralHost = defaultCentralHost
+				info.CentralHost = g.defaultCentralHost
 			}
 			if info.CentralPath == "" {
 				info.CentralPath = uplink.CentralPathFor(info)
 			}
 		}
-		path := strings.TrimSpace(info.ProxyPath)
-		if path == "" {
-			path = info.DeviceID
-		}
-		path = strings.TrimPrefix(path, "/")
+		path := g.pathNameFor(info)
 		if path == "" {
 			continue
 		}
 
-		rtspURL := strings.TrimSpace(info.RTSPURL)
+		rtspURL := g.sourceURLFor(info)
 		if rtspURL == "" {
 			continue
 		}
 
-		cfg.Paths[path] = pathConfigFor(info, rtspURL, retention, republishOnReady, proxyRTSPBase)
+		cfg.Paths[path] = pathConfigFor(info, rtspURL, g.recordDeleteAfter, g.republishOnReady, g.proxyRTSPBase)
 	}
 
 	return cfg
+}
+
+func (g *Generator) pathNameFor(info core.CameraInfo) string {
+	var path string
+	if g.useCentralPaths {
+		path = strings.TrimSpace(info.CentralPath)
+		if path == "" {
+			path = uplink.CentralPathFor(info)
+		}
+	} else {
+		path = strings.TrimSpace(info.ProxyPath)
+		if path == "" {
+			path = info.DeviceID
+		}
+	}
+	path = strings.TrimPrefix(path, "/")
+	if path == "." {
+		return ""
+	}
+	return strings.TrimSpace(path)
+}
+
+func (g *Generator) sourceURLFor(info core.CameraInfo) string {
+	if g.sourceFromProxy {
+		proxyPath := strings.TrimSpace(info.ProxyPath)
+		if proxyPath == "" {
+			proxyPath = info.DeviceID
+		}
+		proxyPath = strings.TrimPrefix(proxyPath, "/")
+		if proxyPath == "" {
+			return ""
+		}
+		return fmt.Sprintf("%s/%s", strings.TrimSuffix(g.proxyRTSPBase, "/"), proxyPath)
+	}
+	return strings.TrimSpace(info.RTSPURL)
 }
 
 func authUsersForAPI(apiUser, apiPass string) []AuthInternalUser {

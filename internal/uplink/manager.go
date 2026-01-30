@@ -23,8 +23,9 @@ const (
 	defaultSRTLatencyMS  = 200
 	defaultReconcileSecs = 15
 
-	uplinkModeContainer = "container"
-	uplinkModeMediaMTX  = "mediamtx"
+	uplinkModeContainer   = "container"
+	uplinkModeMediaMTX    = "mediamtx"
+	uplinkModeCentralPull = "central-pull"
 )
 
 type Manager struct {
@@ -282,11 +283,15 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	srtURL := buildSRTURL(req.CentralHost, req.CentralSRTPort, req.CentralPath)
 	containerName := container.NameForCentralPath(req.CentralPath)
 
-	if m.mode == uplinkModeMediaMTX {
+	if m.mode == uplinkModeMediaMTX || m.mode == uplinkModeCentralPull {
+		containerName := "mediamtx-proxy"
+		if m.mode == uplinkModeCentralPull {
+			containerName = "central-pull"
+		}
 		proc := &uplinkProcess{
 			cameraKey:       cameraKey,
 			payload:         req,
-			container:       "mediamtx-proxy",
+			container:       containerName,
 			containerID:     "",
 			containerStatus: "running",
 			alwaysOn:        alwaysOn,
@@ -296,7 +301,7 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 		m.uplinks[cameraKey] = proc
 		m.refreshTTL(proc, req.TTLSeconds)
 
-		log.Printf("[uplink] mediamtx mode active for %s -> %s (startCount=%d stopCount=%d)", cameraKey, srtURL, proc.startCount, proc.stopCount)
+		log.Printf("[uplink] %s mode active for %s -> %s (startCount=%d stopCount=%d)", m.mode, cameraKey, srtURL, proc.startCount, proc.stopCount)
 		m.notifyStatus(Status{
 			CameraID:      req.CameraID,
 			CentralPath:   req.CentralPath,
@@ -512,7 +517,7 @@ func (m *Manager) stopProcess(proc *uplinkProcess, reason string) {
 		proc.ttlTimer.Stop()
 	}
 	log.Printf("[uplink] stopping %s: %s (startCount=%d stopCount=%d)", proc.cameraKey, reason, proc.startCount, proc.stopCount)
-	if m.mode == uplinkModeMediaMTX {
+	if m.mode == uplinkModeMediaMTX || m.mode == uplinkModeCentralPull {
 		m.notifyStatus(Status{
 			CameraID:      proc.payload.CameraID,
 			CentralPath:   proc.payload.CentralPath,
@@ -733,6 +738,8 @@ func normalizeMode(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case uplinkModeMediaMTX:
 		return uplinkModeMediaMTX
+	case uplinkModeCentralPull:
+		return uplinkModeCentralPull
 	case uplinkModeContainer, "":
 		return uplinkModeContainer
 	default:

@@ -57,6 +57,22 @@ No modo `UPLINK_MODE=mediamtx`, o republish é feito pelo MediaMTX proxy usando
 - `sourceOnDemand: no` para o proxy conectar na origem e disparar `runOnReady`;
 - `runOnReady` chamando FFmpeg com `-c copy` e `streamid=publish:<centralPath>`.
 
+No modo `UPLINK_MODE=central-pull`, o central consome o RTSP direto do proxy,
+sem republish via FFmpeg. O cam-bus passa a gerar o `mediamtx.yml` do central
+com paths apontando para o proxy:
+
+```yml
+paths:
+  <centralPath>:
+    source: rtsp://<proxy-host>:8554/<proxyPath>
+```
+
+Requisitos de conectividade:
+
+- O MediaMTX central precisa alcançar o proxy via RTSP (porta 8554).
+- Configure `UPLINK_PROXY_RTSP_BASE` no central para apontar para o host/porta
+  do proxy (ex.: `rtsp://proxy.mediamtx.local:8554`).
+
 É possível ajustar os argumentos do FFmpeg nos dois modos (container e mediamtx):
 
 - `UPLINK_FFMPEG_GLOBAL_ARGS`: argumentos globais (inseridos logo após `ffmpeg`).
@@ -93,6 +109,14 @@ Para habilitar:
 ```bash
 UPLINK_MODE=mediamtx
 MTX_PROXY_CONFIG_PATH=/caminho/para/mediamtx.yml
+```
+
+Para habilitar o modo central-pull (gerando paths no central):
+
+```bash
+UPLINK_MODE=central-pull
+MTX_CENTRAL_CONFIG_PATH=/caminho/para/mediamtx.yml
+UPLINK_PROXY_RTSP_BASE=rtsp://proxy.mediamtx.local:8554
 ```
 
 Se preferir manter o modo atual, use:
