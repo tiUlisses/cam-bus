@@ -271,13 +271,18 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	})
 	if err != nil {
 		log.Printf("[uplink] docker run failed for %s (container=%s): %v", cameraKey, containerName, err)
+		statusError := err.Error()
+		var startErr *container.StartError
+		if errors.As(err, &startErr) && startErr.Kind == container.StartErrorKindUnsupportedOption && startErr.Summary != "" {
+			statusError = startErr.Summary
+		}
 		m.notifyStatus(Status{
 			CameraID:      req.CameraID,
 			CentralPath:   req.CentralPath,
 			ContainerName: containerName,
 			State:         "error",
 			ExitCode:      0,
-			Error:         err.Error(),
+			Error:         statusError,
 		})
 		return fmt.Errorf("start container uplink: %w", err)
 	}

@@ -14,9 +14,12 @@ import (
 const (
 	defaultDockerBin   = "docker"
 	defaultDockerImage = "jrottenberg/ffmpeg:6.0-alpine"
+	maxFFmpegLogLength = 2000
 )
 
 var invalidNameChars = regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
+var ffmpegOptionNotFound = regexp.MustCompile(`Option ([^\s.]+) not found`)
+var ffmpegUnrecognizedOption = regexp.MustCompile(`Unrecognized option ['"]?([^'"\s]+)['"]?`)
 
 var (
 	defaultFFmpegGlobalArgs = []string{
@@ -52,6 +55,61 @@ type Status struct {
 	State    string
 	ExitCode int
 	Error    string
+}
+
+type StartErrorKind string
+
+const (
+	StartErrorKindUnsupportedOption StartErrorKind = "unsupported_option"
+	StartErrorKindNetworkFailure    StartErrorKind = "network_failure"
+	StartErrorKindUnknown           StartErrorKind = "unknown"
+	StartErrorKindDockerFailure     StartErrorKind = "docker_failure"
+)
+
+type StartError struct {
+	Kind       StartErrorKind
+	Err        error
+	FFmpegArgs []string
+	Logs       string
+	Summary    string
+}
+
+func (e *StartError) Error() string {
+	if e == nil {
+		return ""
+	}
+	var parts []string
+	switch e.Kind {
+	case StartErrorKindUnsupportedOption:
+		if e.Summary != "" {
+			parts = append(parts, e.Summary)
+		} else {
+			parts = append(parts, "ffmpeg unsupported option")
+		}
+	case StartErrorKindNetworkFailure:
+		parts = append(parts, "ffmpeg network failure")
+	case StartErrorKindDockerFailure:
+		parts = append(parts, "docker run failure")
+	default:
+		parts = append(parts, "ffmpeg start failure")
+	}
+	if len(e.FFmpegArgs) > 0 {
+		parts = append(parts, fmt.Sprintf("ffmpeg_args=%q", strings.Join(e.FFmpegArgs, " ")))
+	}
+	if e.Logs != "" {
+		parts = append(parts, fmt.Sprintf("ffmpeg_logs=%q", e.Logs))
+	}
+	if e.Err != nil {
+		parts = append(parts, fmt.Sprintf("err=%v", e.Err))
+	}
+	return strings.Join(parts, " ")
+}
+
+func (e *StartError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 type Request struct {
@@ -95,25 +153,24 @@ func (m *Manager) Start(ctx context.Context, req Request) (string, error) {
 	if err == nil {
 		return containerID, nil
 	}
-	if strings.Contains(logsOut, "Option rw_timeout not found.") {
-		log.Printf("ffmpeg in %q does not support -rw_timeout; retrying without it", m.image)
-		fallbackInputArgs := removeOptionWithValue(m.ffmpegInputArgs, "-rw_timeout")
-		_, _ = m.run(ctx, "rm", "-f", req.Name)
-		containerID, _, retryErr := m.startContainer(ctx, req, fallbackInputArgs)
-		if retryErr == nil {
-			return containerID, nil
+	if logsOut != "" {
+		option := unsupportedFFmpegOption(logsOut)
+		if option != "" {
+			optionFlag := option
+			if !strings.HasPrefix(optionFlag, "-") {
+				optionFlag = "-" + optionFlag
+			}
+			fallbackInputArgs := removeOptionWithValue(m.ffmpegInputArgs, optionFlag)
+			if len(fallbackInputArgs) != len(m.ffmpegInputArgs) {
+				log.Printf("ffmpeg in %q does not support %s; retrying without it", m.image, optionFlag)
+				_, _ = m.run(ctx, "rm", "-f", req.Name)
+				containerID, _, retryErr := m.startContainer(ctx, req, fallbackInputArgs)
+				if retryErr == nil {
+					return containerID, nil
+				}
+				return "", retryErr
+			}
 		}
-		return "", retryErr
-	}
-	if strings.Contains(logsOut, "Option stimeout not found.") {
-		log.Printf("ffmpeg in %q does not support -stimeout; retrying without it", m.image)
-		fallbackInputArgs := removeOptionWithValue(m.ffmpegInputArgs, "-stimeout")
-		_, _ = m.run(ctx, "rm", "-f", req.Name)
-		containerID, _, retryErr := m.startContainer(ctx, req, fallbackInputArgs)
-		if retryErr == nil {
-			return containerID, nil
-		}
-		return "", retryErr
 	}
 	return "", err
 }
@@ -123,7 +180,12 @@ func (m *Manager) startContainer(ctx context.Context, req Request, inputArgs []s
 	runArgs := append([]string{"run", "-d", "--name", req.Name, "--network", "host", m.image}, ffmpegArgs...)
 	runOut, err := m.run(ctx, runArgs...)
 	if err != nil {
-		return "", "", fmt.Errorf("start docker container: %w", err)
+		return "", runOut, &StartError{
+			Kind:       StartErrorKindDockerFailure,
+			Err:        fmt.Errorf("start docker container: %w", err),
+			FFmpegArgs: ffmpegArgs,
+			Logs:       truncateString(strings.TrimSpace(runOut), maxFFmpegLogLength),
+		}
 	}
 	containerID := strings.TrimSpace(runOut)
 	if containerID == "" {
@@ -134,9 +196,16 @@ func (m *Manager) startContainer(ctx context.Context, req Request, inputArgs []s
 		return "", "", err
 	}
 	if status != "running" {
-		logsOut, _ := m.run(ctx, "logs", "--tail", "50", containerID)
+		logsOut, _ := m.run(ctx, "logs", "--tail", "200", containerID)
 		logsSnippet := strings.TrimSpace(logsOut)
-		return "", logsOut, fmt.Errorf("container %s not running (status=%s exitCode=%s stateError=%s logs=%s)", containerID, status, exitCode, strings.TrimSpace(stateErr), logsSnippet)
+		kind, summary := classifyFFmpegLogs(logsSnippet)
+		return "", logsOut, &StartError{
+			Kind:       kind,
+			Err:        fmt.Errorf("container %s not running (status=%s exitCode=%s stateError=%s)", containerID, status, exitCode, strings.TrimSpace(stateErr)),
+			FFmpegArgs: ffmpegArgs,
+			Logs:       truncateString(logsSnippet, maxFFmpegLogLength),
+			Summary:    summary,
+		}
 	}
 	return containerID, "", nil
 }
@@ -209,6 +278,51 @@ func removeOptionWithValue(args []string, option string) []string {
 		filtered = append(filtered, arg)
 	}
 	return filtered
+}
+
+func truncateString(value string, maxLen int) string {
+	if maxLen <= 0 || value == "" {
+		return value
+	}
+	if len(value) <= maxLen {
+		return value
+	}
+	return value[:maxLen] + "...(truncated)"
+}
+
+func unsupportedFFmpegOption(logs string) string {
+	if matches := ffmpegOptionNotFound.FindStringSubmatch(logs); len(matches) > 1 {
+		return matches[1]
+	}
+	if matches := ffmpegUnrecognizedOption.FindStringSubmatch(logs); len(matches) > 1 {
+		return matches[1]
+	}
+	return ""
+}
+
+func classifyFFmpegLogs(logs string) (StartErrorKind, string) {
+	if logs == "" {
+		return StartErrorKindUnknown, ""
+	}
+	if option := unsupportedFFmpegOption(logs); option != "" {
+		return StartErrorKindUnsupportedOption, fmt.Sprintf("ffmpeg unsupported option: %s", option)
+	}
+	networkIndicators := []string{
+		"Connection refused",
+		"Connection timed out",
+		"Network is unreachable",
+		"No route to host",
+		"Connection reset by peer",
+		"Could not resolve host",
+		"Server returned 404",
+		"HTTP error",
+	}
+	for _, indicator := range networkIndicators {
+		if strings.Contains(logs, indicator) {
+			return StartErrorKindNetworkFailure, ""
+		}
+	}
+	return StartErrorKindUnknown, ""
 }
 
 func validateRequest(req Request) error {
