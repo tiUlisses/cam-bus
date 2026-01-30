@@ -219,6 +219,10 @@ func (m *Manager) applyDefaults(req Request) Request {
 	return req
 }
 
+func (m *Manager) ResolveRequest(req Request) Request {
+	return m.applyDefaults(req)
+}
+
 func validateStart(req Request) error {
 	if req.CameraID == "" {
 		return errors.New("cameraId required")

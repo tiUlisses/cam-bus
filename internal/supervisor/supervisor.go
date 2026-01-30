@@ -744,15 +744,16 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 			})
 		}
 	}
-	if err := req.Validate(); err != nil {
+	resolved := s.uplink.ResolveRequest(req)
+	if err := resolved.Validate(); err != nil {
 		log.Printf("[uplink] invalid payload on %s: %v", topic, err)
 		return
 	}
 
 	switch strings.ToLower(action) {
 	case "start":
-		if err := s.uplink.Start(req); err != nil {
-			log.Printf("[uplink] start failed for %s: %v", req.CameraID, err)
+		if err := s.uplink.Start(resolved); err != nil {
+			log.Printf("[uplink] start failed for %s: %v", resolved.CameraID, err)
 			return
 		}
 		info := core.CameraInfo{
@@ -762,7 +763,7 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 			DeviceType: devType,
 			DeviceID:   devID,
 		}
-		s.setUplinkState(s.keyFor(info), req)
+		s.setUplinkState(s.keyFor(info), resolved)
 		s.refreshMediaMTXConfig()
 	case "stop":
 		info := core.CameraInfo{
@@ -776,8 +777,8 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 			log.Printf("[uplink] stop ignored for %s: always-on ativo", info.DeviceID)
 			return
 		}
-		if err := s.uplink.Stop(req); err != nil {
-			log.Printf("[uplink] stop failed for %s: %v", req.CameraID, err)
+		if err := s.uplink.Stop(resolved); err != nil {
+			log.Printf("[uplink] stop failed for %s: %v", resolved.CameraID, err)
 			return
 		}
 		s.maybeStopUplinkState(s.keyFor(info))
@@ -790,7 +791,7 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 			DeviceType: devType,
 			DeviceID:   devID,
 		}
-		status, ok := s.uplink.StatusFor(req)
+		status, ok := s.uplink.StatusFor(resolved)
 		if !ok {
 			status, ok = s.lastUplinkStatus(s.keyFor(info))
 		}
@@ -798,10 +799,10 @@ func (s *Supervisor) handleUplinkMessage(topic string, payload []byte) {
 			return
 		}
 		if status.CameraID == "" {
-			status.CameraID = req.CameraID
+			status.CameraID = resolved.CameraID
 		}
 		if status.CentralPath == "" {
-			status.CentralPath = req.CentralPath
+			status.CentralPath = resolved.CentralPath
 		}
 		s.handleUplinkStatus(status)
 	default:
