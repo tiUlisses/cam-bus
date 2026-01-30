@@ -639,7 +639,7 @@ func (s *Supervisor) handleInfoMessage(topic string, payload []byte) {
 	if info.CentralPath == "" {
 		info.CentralPath = uplink.CentralPathFor(info)
 	}
-	if s.uplink != nil && s.uplink.IgnoreUplinkEnabled() {
+	if s.uplink != nil && (s.uplink.IgnoreUplinkEnabled() || s.uplink.AlwaysOnEnabled(info)) {
 		if info.CentralHost == "" {
 			info.CentralHost = s.uplink.DefaultCentralHost()
 		}
