@@ -22,7 +22,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const maxRecordDeleteAfter = 10 * time.Minute
+const (
+	maxRecordDeleteAfter = 10 * time.Minute
+	defaultProxyRTSPBase = "rtsp://localhost:8554"
+	defaultSRTPacketSize = 1316
+	defaultSRTPort       = 8890
+	defaultSRTLatencyMS  = 200
+)
 
 // Config representa o YAML mínimo do MediaMTX para caminhos dinâmicos.
 type Config struct {
@@ -48,6 +54,8 @@ type PathDefaults struct {
 type PathConfig struct {
 	Source            string `yaml:"source,omitempty" json:"source,omitempty"`
 	SourceOnDemand    bool   `yaml:"sourceOnDemand" json:"sourceOnDemand"`
+	RunOnReady        string `yaml:"runOnReady,omitempty" json:"runOnReady,omitempty"`
+	RunOnReadyRestart bool   `yaml:"runOnReadyRestart,omitempty" json:"runOnReadyRestart,omitempty"`
 	Record            *bool  `yaml:"record,omitempty" json:"record,omitempty"`
 	RecordDeleteAfter string `yaml:"recordDeleteAfter,omitempty" json:"recordDeleteAfter,omitempty"`
 }
@@ -84,6 +92,8 @@ type Generator struct {
 	apiUser           string
 	apiPass           string
 	recordDeleteAfter time.Duration
+	republishOnReady  bool
+	proxyRTSPBase     string
 	httpClient        *http.Client
 	mu                sync.Mutex
 }
@@ -126,6 +136,10 @@ func NewGeneratorFromEnv() *Generator {
 		retention = maxRecordDeleteAfter
 	}
 
+	uplinkMode := strings.ToLower(strings.TrimSpace(os.Getenv("UPLINK_MODE")))
+	republishOnReady := uplinkMode == "mediamtx"
+	proxyRTSPBase := strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/")
+
 	return &Generator{
 		path:              path,
 		reloadPID:         reloadPID,
@@ -136,6 +150,8 @@ func NewGeneratorFromEnv() *Generator {
 		apiUser:           apiUser,
 		apiPass:           apiPass,
 		recordDeleteAfter: retention,
+		republishOnReady:  republishOnReady,
+		proxyRTSPBase:     proxyRTSPBase,
 		httpClient:        &http.Client{Timeout: 5 * time.Second},
 	}
 }
@@ -153,7 +169,7 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	if err != nil {
 		return err
 	}
-	cfg := buildConfig(cameras, g.recordDeleteAfter, g.apiUser, g.apiPass)
+	cfg := buildConfig(cameras, g.recordDeleteAfter, g.apiUser, g.apiPass, g.republishOnReady, g.proxyRTSPBase)
 	if g.apiUser == "" && g.apiPass == "" {
 		cfg.AuthInternalUsers = existing.AuthInternalUsers
 	}
@@ -176,7 +192,7 @@ func (g *Generator) Sync(cameras []core.CameraInfo) error {
 	return nil
 }
 
-func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, apiPass string) Config {
+func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, apiPass string, republishOnReady bool, proxyRTSPBase string) Config {
 	cfg := Config{
 		RTSPAddress:       ":8554",
 		HLS:               false,
@@ -210,7 +226,7 @@ func buildConfig(cameras []core.CameraInfo, retention time.Duration, apiUser, ap
 			continue
 		}
 
-		cfg.Paths[path] = pathConfigFor(info, rtspURL, retention)
+		cfg.Paths[path] = pathConfigFor(info, rtspURL, retention, republishOnReady, proxyRTSPBase)
 	}
 
 	return cfg
@@ -241,10 +257,16 @@ func authUsersForAPI(apiUser, apiPass string) []AuthInternalUser {
 	}
 }
 
-func pathConfigFor(info core.CameraInfo, rtspURL string, defaultRetention time.Duration) PathConfig {
+func pathConfigFor(info core.CameraInfo, rtspURL string, defaultRetention time.Duration, republishOnReady bool, proxyRTSPBase string) PathConfig {
 	cfg := PathConfig{
 		Source:         rtspURL,
 		SourceOnDemand: false,
+	}
+
+	if republishOnReady && info.CentralHost != "" && info.CentralPath != "" {
+		cfg.SourceOnDemand = true
+		cfg.RunOnReady = buildRepublishCommand(proxyRTSPBase, info)
+		cfg.RunOnReadyRestart = true
 	}
 
 	if !info.RecordEnabled {
@@ -259,6 +281,32 @@ func pathConfigFor(info core.CameraInfo, rtspURL string, defaultRetention time.D
 	}
 
 	return cfg
+}
+
+func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
+	proxyPath := strings.Trim(strings.TrimSpace(info.ProxyPath), "/")
+	if proxyPath == "" {
+		proxyPath = strings.Trim(strings.TrimSpace(info.DeviceID), "/")
+	}
+	proxyURL := fmt.Sprintf("%s/%s", strings.TrimSuffix(proxyRTSPBase, "/"), proxyPath)
+	srtURL := buildSRTURL(info.CentralHost, info.CentralSRTPort, info.CentralPath)
+	return fmt.Sprintf("ffmpeg -hide_banner -rtsp_transport tcp -i %s -c copy -f mpegts -mpegts_flags +resend_headers -muxdelay 0 -muxpreload 0 %s", proxyURL, srtURL)
+}
+
+func buildSRTURL(host string, port int, path string) string {
+	if port <= 0 {
+		port = defaultSRTPort
+	}
+	streamID := fmt.Sprintf("publish:%s", path)
+	latency := getenvInt("UPLINK_SRT_LATENCY", defaultSRTLatencyMS)
+	query := fmt.Sprintf("streamid=%s&pkt_size=%d&latency=%d&mode=caller&transtype=live", streamID, defaultSRTPacketSize, latency)
+
+	u := url.URL{
+		Scheme:   "srt",
+		Host:     fmt.Sprintf("%s:%d", host, port),
+		RawQuery: query,
+	}
+	return u.String()
 }
 
 func retentionForCamera(info core.CameraInfo, defaultRetention time.Duration) time.Duration {
@@ -495,4 +543,21 @@ func formatDuration(duration time.Duration) string {
 		return fmt.Sprintf("%ds", int(duration.Seconds()))
 	}
 	return duration.String()
+}
+
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func getenvInt(key string, def int) int {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		var x int
+		if _, err := fmt.Sscanf(v, "%d", &x); err == nil && x > 0 {
+			return x
+		}
+	}
+	return def
 }

@@ -22,12 +22,16 @@ const (
 	defaultSRTPort       = 8890
 	defaultSRTLatencyMS  = 200
 	defaultReconcileSecs = 15
+
+	uplinkModeContainer = "container"
+	uplinkModeMediaMTX  = "mediamtx"
 )
 
 type Manager struct {
 	proxyRTSPBase      string
 	defaultCentralHost string
 	defaultSRTPort     int
+	mode               string
 	containerManager   *container.Manager
 	reconcileInterval  time.Duration
 	reconcileStop      chan struct{}
@@ -62,6 +66,7 @@ func NewManagerFromEnv() *Manager {
 		proxyRTSPBase:      strings.TrimSuffix(getenv("UPLINK_PROXY_RTSP_BASE", defaultProxyRTSPBase), "/"),
 		defaultCentralHost: strings.TrimSpace(os.Getenv("UPLINK_CENTRAL_HOST")),
 		defaultSRTPort:     getenvInt("UPLINK_CENTRAL_SRT_PORT", defaultSRTPort),
+		mode:               normalizeMode(os.Getenv("UPLINK_MODE")),
 		containerManager:   container.NewManagerFromEnv(),
 		reconcileInterval:  time.Duration(getenvInt("UPLINK_RECONCILE_INTERVAL_SECONDS", defaultReconcileSecs)) * time.Second,
 		reconcileStop:      make(chan struct{}),
@@ -196,6 +201,32 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	proxyURL := fmt.Sprintf("%s/%s", m.proxyRTSPBase, strings.TrimPrefix(req.ProxyPath, "/"))
 	srtURL := buildSRTURL(req.CentralHost, req.CentralSRTPort, req.CentralPath)
 	containerName := container.NameForCentralPath(req.CentralPath)
+
+	if m.mode == uplinkModeMediaMTX {
+		proc := &uplinkProcess{
+			cameraKey:       cameraKey,
+			payload:         req,
+			container:       "mediamtx-proxy",
+			containerID:     "",
+			containerStatus: "running",
+			startCount:      1,
+			stopCount:       0,
+		}
+		m.uplinks[cameraKey] = proc
+		m.refreshTTL(proc, req.TTLSeconds)
+
+		log.Printf("[uplink] mediamtx mode active for %s -> %s (startCount=%d stopCount=%d)", cameraKey, srtURL, proc.startCount, proc.stopCount)
+		m.notifyStatus(Status{
+			CameraID:      req.CameraID,
+			CentralPath:   req.CentralPath,
+			ContainerName: proc.container,
+			State:         "running",
+			ExitCode:      0,
+			Error:         "",
+		})
+		return nil
+	}
+
 	startCtx := context.Background()
 	containerID, err := m.containerManager.Start(startCtx, container.Request{
 		Name:     containerName,
@@ -243,6 +274,9 @@ func (m *Manager) startReconciler() {
 	if m.reconcileInterval <= 0 {
 		return
 	}
+	if m.mode != uplinkModeContainer {
+		return
+	}
 	log.Printf("[uplink] reconcile loop started (interval=%s)", m.reconcileInterval)
 	go func() {
 		ticker := time.NewTicker(m.reconcileInterval)
@@ -284,6 +318,9 @@ func (m *Manager) snapshotUplinks() []uplinkSnapshot {
 }
 
 func (m *Manager) reconcileOnce() {
+	if m.mode != uplinkModeContainer {
+		return
+	}
 	snapshots := m.snapshotUplinks()
 	if len(snapshots) == 0 {
 		return
@@ -348,6 +385,17 @@ func (m *Manager) stopProcess(proc *uplinkProcess, reason string) {
 		proc.ttlTimer.Stop()
 	}
 	log.Printf("[uplink] stopping %s: %s (startCount=%d stopCount=%d)", proc.cameraKey, reason, proc.startCount, proc.stopCount)
+	if m.mode == uplinkModeMediaMTX {
+		m.notifyStatus(Status{
+			CameraID:      proc.payload.CameraID,
+			CentralPath:   proc.payload.CentralPath,
+			ContainerName: proc.container,
+			State:         "stopped",
+			ExitCode:      0,
+			Error:         reason,
+		})
+		return
+	}
 	stopCtx := context.Background()
 	if err := m.containerManager.Stop(stopCtx, proc.container); err != nil {
 		log.Printf("[uplink] stopProcess failed for %s: %v", proc.cameraKey, err)
@@ -437,6 +485,18 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func normalizeMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case uplinkModeMediaMTX:
+		return uplinkModeMediaMTX
+	case uplinkModeContainer, "":
+		return uplinkModeContainer
+	default:
+		log.Printf("[uplink] modo inválido UPLINK_MODE=%q, usando %s", raw, uplinkModeContainer)
+		return uplinkModeContainer
+	}
 }
 
 func getenvInt(key string, def int) int {

@@ -15,6 +15,32 @@ Exemplo de payload (START):
 }
 ```
 
+## Modos de uplink (container vs mediamtx)
+
+Por padrão (`UPLINK_MODE=container`), o cam-bus inicia um container FFmpeg para
+republish RTSP->SRT ao central. Esse modo depende do Docker disponível no host.
+
+No modo `UPLINK_MODE=mediamtx`, o republish é feito pelo MediaMTX proxy usando
+`runOnReady` por path. O cam-bus deixa de iniciar containers e passa a gerar o
+`mediamtx.yml` do proxy com:
+
+- `record: yes` herdado de `pathDefaults` (ex.: `infra/mediamtx/proxy/mediamtx.yml`);
+- `sourceOnDemand: yes` para só republish quando a fonte estiver pronta;
+- `runOnReady` chamando FFmpeg com `-c copy` e `streamid=publish:<centralPath>`.
+
+Para habilitar:
+
+```bash
+UPLINK_MODE=mediamtx
+MTX_PROXY_CONFIG_PATH=/caminho/para/mediamtx.yml
+```
+
+Se preferir manter o modo atual, use:
+
+```bash
+UPLINK_MODE=container
+```
+
 ## MediaMTX Central com paths dinâmicos
 
 Para aceitar publicações dinâmicas, a configuração do MediaMTX central deve ter
