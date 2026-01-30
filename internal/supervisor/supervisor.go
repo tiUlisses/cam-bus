@@ -1147,7 +1147,14 @@ func (s *Supervisor) snapshotCameraInfosForMediaMTX() []core.CameraInfo {
 
 	infos := make([]core.CameraInfo, 0, len(s.cameras))
 	for key, info := range s.cameras {
-		if state, ok := s.uplinkStates[key]; ok && state.startCount > state.stopCount {
+		state, ok := s.uplinkStates[key]
+		if (!ok || state.startCount <= state.stopCount) && len(s.uplinkStates) > 0 {
+			if fallback, found := s.findUplinkStateForCameraLocked(info); found {
+				state = fallback
+				ok = true
+			}
+		}
+		if ok && state.startCount > state.stopCount {
 			info.CentralHost = state.centralHost
 			info.CentralPath = state.centralPath
 			info.CentralSRTPort = state.centralSRTPort
@@ -1162,6 +1169,34 @@ func (s *Supervisor) snapshotCameraInfosForMediaMTX() []core.CameraInfo {
 		infos = append(infos, info)
 	}
 	return infos
+}
+
+func (s *Supervisor) findUplinkStateForCameraLocked(info core.CameraInfo) (uplinkState, bool) {
+	infoDeviceID := normalizeUplinkMatch(info.DeviceID)
+	infoProxyPath := normalizeUplinkMatch(info.ProxyPath)
+	infoCentralPath := normalizeUplinkMatch(info.CentralPath)
+
+	for _, state := range s.uplinkStates {
+		if state.startCount <= state.stopCount {
+			continue
+		}
+		if infoDeviceID != "" && strings.EqualFold(normalizeUplinkMatch(state.cameraID), infoDeviceID) {
+			return state, true
+		}
+		stateProxy := normalizeUplinkMatch(state.proxyPath)
+		if infoProxyPath != "" && stateProxy != "" && strings.EqualFold(stateProxy, infoProxyPath) {
+			return state, true
+		}
+		stateCentral := normalizeUplinkMatch(state.centralPath)
+		if infoCentralPath != "" && stateCentral != "" && strings.EqualFold(stateCentral, infoCentralPath) {
+			return state, true
+		}
+		if infoProxyPath != "" && stateCentral != "" && strings.EqualFold(stateCentral, infoProxyPath) {
+			return state, true
+		}
+	}
+
+	return uplinkState{}, false
 }
 
 func (s *Supervisor) snapshotCameraInfos() []core.CameraInfo {
@@ -1262,4 +1297,8 @@ func normalizeCentralPort(port int) int {
 		return 8890
 	}
 	return port
+}
+
+func normalizeUplinkMatch(value string) string {
+	return strings.Trim(strings.TrimSpace(value), "/")
 }
