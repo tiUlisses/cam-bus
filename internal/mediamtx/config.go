@@ -31,6 +31,22 @@ const (
 	defaultSRTLatencyMS  = 200
 )
 
+var (
+	defaultFFmpegGlobalArgs = []string{
+		"-hide_banner",
+	}
+	defaultFFmpegInputArgs = []string{
+		"-rtsp_transport", "tcp",
+	}
+	defaultFFmpegOutputArgs = []string{
+		"-c", "copy",
+		"-f", "mpegts",
+		"-mpegts_flags", "+resend_headers",
+		"-muxdelay", "0",
+		"-muxpreload", "0",
+	}
+)
+
 // Config representa o YAML mínimo do MediaMTX para caminhos dinâmicos.
 type Config struct {
 	RTSPAddress       string                `yaml:"rtspAddress,omitempty"`
@@ -304,7 +320,17 @@ func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
 	}
 	proxyURL := fmt.Sprintf("%s/%s", strings.TrimSuffix(proxyRTSPBase, "/"), proxyPath)
 	srtURL := buildSRTURL(info.CentralHost, info.CentralSRTPort, info.CentralPath)
-	return fmt.Sprintf("ffmpeg -hide_banner -rtsp_transport tcp -i %s -c copy -f mpegts -mpegts_flags +resend_headers -muxdelay 0 -muxpreload 0 %s", proxyURL, srtURL)
+	globalArgs := parseArgsEnv("UPLINK_FFMPEG_GLOBAL_ARGS", defaultFFmpegGlobalArgs)
+	inputArgs := parseArgsEnv("UPLINK_FFMPEG_INPUT_ARGS", defaultFFmpegInputArgs)
+	outputArgs := parseArgsEnv("UPLINK_FFMPEG_OUTPUT_ARGS", defaultFFmpegOutputArgs)
+
+	args := []string{"ffmpeg"}
+	args = append(args, globalArgs...)
+	args = append(args, inputArgs...)
+	args = append(args, "-i", proxyURL)
+	args = append(args, outputArgs...)
+	args = append(args, srtURL)
+	return strings.Join(args, " ")
 }
 
 func buildSRTURL(host string, port int, path string) string {
@@ -562,6 +588,13 @@ func formatDuration(duration time.Duration) string {
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func parseArgsEnv(key string, def []string) []string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return strings.Fields(v)
 	}
 	return def
 }

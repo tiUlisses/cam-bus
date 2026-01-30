@@ -57,6 +57,12 @@ No modo `UPLINK_MODE=mediamtx`, o republish é feito pelo MediaMTX proxy usando
 - `sourceOnDemand: no` para o proxy conectar na origem e disparar `runOnReady`;
 - `runOnReady` chamando FFmpeg com `-c copy` e `streamid=publish:<centralPath>`.
 
+É possível ajustar os argumentos do FFmpeg nos dois modos (container e mediamtx):
+
+- `UPLINK_FFMPEG_GLOBAL_ARGS`: argumentos globais (inseridos logo após `ffmpeg`).
+- `UPLINK_FFMPEG_INPUT_ARGS`: argumentos antes do `-i` (aplicados ao input RTSP).
+- `UPLINK_FFMPEG_OUTPUT_ARGS`: argumentos antes da URL SRT (aplicados ao output).
+
 Para habilitar:
 
 ```bash
