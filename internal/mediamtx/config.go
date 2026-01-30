@@ -469,6 +469,7 @@ func buildSRTURL(host string, port int, path string) string {
 	if rcvBuf > 0 {
 		queryValues.Set("rcvbuf", fmt.Sprintf("%d", rcvBuf))
 	}
+	applySRTQueryOptions(queryValues)
 
 	u := url.URL{
 		Scheme:   "srt",
@@ -476,6 +477,60 @@ func buildSRTURL(host string, port int, path string) string {
 		RawQuery: queryValues.Encode(),
 	}
 	return u.String()
+}
+
+func applySRTQueryOptions(queryValues url.Values) {
+	passphrase := strings.TrimSpace(os.Getenv("UPLINK_SRT_PASSPHRASE"))
+	if passphrase != "" {
+		queryValues.Set("passphrase", passphrase)
+	}
+	pbkeylen := getenvInt("UPLINK_SRT_PBKEYLEN", 0)
+	if pbkeylen > 0 {
+		queryValues.Set("pbkeylen", fmt.Sprintf("%d", pbkeylen))
+	}
+	peerLatency := getenvInt("UPLINK_SRT_PEERLATENCY", 0)
+	if peerLatency > 0 {
+		queryValues.Set("peerlatency", fmt.Sprintf("%d", peerLatency))
+	}
+	rcvLatency := getenvInt("UPLINK_SRT_RCVLATENCY", 0)
+	if rcvLatency > 0 {
+		queryValues.Set("rcvlatency", fmt.Sprintf("%d", rcvLatency))
+	}
+	connTimeout := getenvInt("UPLINK_SRT_CONNTIMEO", 0)
+	if connTimeout > 0 {
+		queryValues.Set("conntimeo", fmt.Sprintf("%d", connTimeout))
+	}
+	sndBuf := getenvInt("UPLINK_SRT_SNDBUF", 0)
+	if sndBuf > 0 {
+		queryValues.Set("sndbuf", fmt.Sprintf("%d", sndBuf))
+	}
+	inputBW := getenvInt("UPLINK_SRT_INPUTBW", 0)
+	if inputBW > 0 {
+		queryValues.Set("inputbw", fmt.Sprintf("%d", inputBW))
+	}
+	oheadBW := getenvInt("UPLINK_SRT_OHEADBW", 0)
+	if oheadBW > 0 {
+		queryValues.Set("oheadbw", fmt.Sprintf("%d", oheadBW))
+	}
+	if getenvBool("UPLINK_SRT_TLPKTDROP", false) {
+		queryValues.Set("tlpktdrop", "1")
+	}
+	extra := strings.TrimSpace(os.Getenv("UPLINK_SRT_EXTRA_PARAMS"))
+	if extra == "" {
+		return
+	}
+	parsed, err := url.ParseQuery(extra)
+	if err != nil {
+		log.Printf("[mediamtx] parâmetros SRT inválidos em UPLINK_SRT_EXTRA_PARAMS=%q: %v", extra, err)
+		return
+	}
+	for key, values := range parsed {
+		if len(values) == 0 {
+			queryValues.Set(key, "")
+			continue
+		}
+		queryValues.Set(key, values[len(values)-1])
+	}
 }
 
 func retentionForCamera(info core.CameraInfo, defaultRetention time.Duration) time.Duration {

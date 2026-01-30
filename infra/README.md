@@ -87,6 +87,16 @@ Os parâmetros SRT podem ser ajustados via variáveis de ambiente:
 - `UPLINK_SRT_MAXBW` (bps, opcional)
 - `UPLINK_SRT_RCVBUF` (bytes, opcional)
 - `UPLINK_SRT_LATENCY` (ms, default: 200)
+- `UPLINK_SRT_SNDBUF` (bytes, opcional)
+- `UPLINK_SRT_INPUTBW` (bps, opcional)
+- `UPLINK_SRT_OHEADBW` (percentual, opcional)
+- `UPLINK_SRT_PEERLATENCY` (ms, opcional)
+- `UPLINK_SRT_RCVLATENCY` (ms, opcional)
+- `UPLINK_SRT_CONNTIMEO` (ms, opcional)
+- `UPLINK_SRT_TLPKTDROP` (`true`/`false`, opcional)
+- `UPLINK_SRT_PASSPHRASE` (string, opcional)
+- `UPLINK_SRT_PBKEYLEN` (bits: 16/24/32, opcional)
+- `UPLINK_SRT_EXTRA_PARAMS` (query string extra, opcional)
 
 Exemplo para link instável (prioriza tolerância a jitter):
 
@@ -102,6 +112,30 @@ Exemplo para baixa latência (prioriza tempo de entrega):
 UPLINK_SRT_LATENCY=80
 UPLINK_SRT_PACKET_SIZE=1316
 UPLINK_SRT_RCVBUF=2097152
+```
+
+Exemplo para links instáveis com tolerância a jitter/perda:
+
+```bash
+UPLINK_SRT_LATENCY=500
+UPLINK_SRT_PEERLATENCY=500
+UPLINK_SRT_RCVLATENCY=500
+UPLINK_SRT_TLPKTDROP=true
+UPLINK_SRT_RCVBUF=8388608
+UPLINK_SRT_SNDBUF=8388608
+```
+
+Exemplo de autenticação (quando o central exigir passphrase):
+
+```bash
+UPLINK_SRT_PASSPHRASE="minha-chave"
+UPLINK_SRT_PBKEYLEN=16
+```
+
+Se precisar de parâmetros avançados ainda não listados, use `UPLINK_SRT_EXTRA_PARAMS`:
+
+```bash
+UPLINK_SRT_EXTRA_PARAMS="linger=1&nakreport=1&groupconnect=0"
 ```
 
 Para habilitar:
