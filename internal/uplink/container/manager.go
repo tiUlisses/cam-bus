@@ -313,6 +313,8 @@ func classifyFFmpegLogs(logs string) (StartErrorKind, string) {
 		"Network is unreachable",
 		"No route to host",
 		"Connection reset by peer",
+		"ERROR:PEER",
+		"Peer rejected connection",
 		"Could not resolve host",
 		"Server returned 404",
 		"HTTP error",
