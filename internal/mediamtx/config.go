@@ -310,7 +310,7 @@ func (g *Generator) buildConfig(existing Config, exists bool, cameras []core.Cam
 		}
 
 		rtspURL := g.sourceURLFor(info)
-		if rtspURL == "" {
+		if rtspURL == "" && !g.republishOnReady {
 			continue
 		}
 
