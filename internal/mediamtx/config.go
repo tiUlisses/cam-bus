@@ -482,13 +482,20 @@ func buildRepublishScript(ffmpegCommand string, srtURLs []string) string {
 	}
 	candidates := strings.Join(quotedCandidates, " ")
 	lines := []string{
+		"set -eu",
 		"backoff=${UPLINK_SRT_RETRY_BACKOFF_SECONDS:-2}",
+		`case "$backoff" in`,
+		`  ""|*[!0-9]*) backoff=2 ;;`,
+		"esac",
 		fmt.Sprintf("for candidate in %s; do", candidates),
 		`  echo "[uplink] trying SRT candidate: $candidate"`,
 		fmt.Sprintf("  if %s \"$candidate\"; then", ffmpegCommand),
 		"    exit 0",
 		"  fi",
 		"  status=$?",
+		`  case "$status" in`,
+		`    ""|*[!0-9]*) status=127 ;;`,
+		"  esac",
 		`  echo "[uplink] SRT candidate failed (exit $status): $candidate"`,
 		"  sleep \"$backoff\"",
 		"done",
