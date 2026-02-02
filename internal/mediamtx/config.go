@@ -442,20 +442,48 @@ func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
 		srtURLs = []string{""}
 	}
 
-	commands := make([]string, 0, len(srtURLs))
-	for _, srtURL := range srtURLs {
-		args := append([]string{}, baseArgs...)
-		args = append(args, srtURL)
-		commands = append(commands, joinCommandArgs(args))
-	}
-	if len(commands) == 1 {
-		return commands[0]
-	}
-	return strings.Join(commands, " || ")
+	ffmpegCommand := joinCommandArgs(baseArgs)
+	script := buildRepublishScript(ffmpegCommand, srtURLs)
+	return joinCommandArgs([]string{"sh", "-c", script})
 }
 
 func joinCommandArgs(args []string) string {
-	return strings.Join(args, " ")
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	escaped := strings.ReplaceAll(value, "'", `'"'"'`)
+	return "'" + escaped + "'"
+}
+
+func buildRepublishScript(ffmpegCommand string, srtURLs []string) string {
+	quotedCandidates := make([]string, 0, len(srtURLs))
+	for _, srtURL := range srtURLs {
+		quotedCandidates = append(quotedCandidates, shellQuote(srtURL))
+	}
+	candidates := strings.Join(quotedCandidates, " ")
+	lines := []string{
+		"backoff=${UPLINK_SRT_RETRY_BACKOFF_SECONDS:-2}",
+		fmt.Sprintf("for candidate in %s; do", candidates),
+		`  echo "[uplink] trying SRT candidate: $candidate"`,
+		fmt.Sprintf("  if %s \"$candidate\"; then", ffmpegCommand),
+		"    exit 0",
+		"  fi",
+		"  status=$?",
+		`  echo "[uplink] SRT candidate failed (exit $status): $candidate"`,
+		"  sleep \"$backoff\"",
+		"done",
+		`echo "[uplink] all SRT candidates failed"`,
+		"exit 1",
+	}
+	return strings.Join(lines, "\n")
 }
 
 func retentionForCamera(info core.CameraInfo, defaultRetention time.Duration) time.Duration {

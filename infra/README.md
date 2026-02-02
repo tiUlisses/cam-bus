@@ -57,6 +57,11 @@ No modo `UPLINK_MODE=mediamtx`, o republish é feito pelo MediaMTX proxy usando
 - `sourceOnDemand: no` para o proxy conectar na origem e disparar `runOnReady`;
 - `runOnReady` chamando FFmpeg com `-c copy` e `streamid=publish:<centralPath>`.
 
+Quando há múltiplos candidatos SRT, o `runOnReady` executa um wrapper que tenta
+cada URL em sequência, registra no log qual candidato foi usado e o motivo da
+falha (código de saída do FFmpeg), e aguarda um pequeno backoff entre tentativas.
+O backoff pode ser ajustado via `UPLINK_SRT_RETRY_BACKOFF_SECONDS` (default: 2s).
+
 No modo `UPLINK_MODE=central-pull`, o central consome o RTSP direto do proxy,
 sem republish via FFmpeg. O cam-bus passa a gerar o `mediamtx.yml` do central
 com paths apontando para o proxy:
