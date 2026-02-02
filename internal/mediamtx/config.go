@@ -28,22 +28,6 @@ const (
 	defaultProxyRTSPBase = "rtsp://localhost:8554"
 )
 
-var (
-	defaultFFmpegGlobalArgs = []string{
-		"-hide_banner",
-	}
-	defaultFFmpegInputArgs = []string{
-		"-rtsp_transport", "tcp",
-	}
-	defaultFFmpegOutputArgs = []string{
-		"-c", "copy",
-		"-f", "mpegts",
-		"-mpegts_flags", "+resend_headers",
-		"-muxdelay", "0",
-		"-muxpreload", "0",
-	}
-)
-
 // Config representa o YAML mínimo do MediaMTX para caminhos dinâmicos.
 type Config struct {
 	RTSPAddress       string                `yaml:"rtspAddress,omitempty"`
@@ -438,19 +422,10 @@ func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
 		log.Printf("[mediamtx] srt candidates vazios host=%q path=%q", info.CentralHost, info.CentralPath)
 		return ""
 	}
-	globalArgs := parseArgsEnv("UPLINK_FFMPEG_GLOBAL_ARGS", defaultFFmpegGlobalArgs)
-	inputArgs := parseArgsEnv("UPLINK_FFMPEG_INPUT_ARGS", defaultFFmpegInputArgs)
-	outputArgs := parseArgsEnv("UPLINK_FFMPEG_OUTPUT_ARGS", defaultFFmpegOutputArgs)
 
-	baseArgs := []string{"ffmpeg"}
-	baseArgs = append(baseArgs, globalArgs...)
-	baseArgs = append(baseArgs, inputArgs...)
-	baseArgs = append(baseArgs, "-i", proxyURL)
-	baseArgs = append(baseArgs, outputArgs...)
-
-	ffmpegCommand := joinCommandArgs(baseArgs)
-	script := buildRepublishScript(ffmpegCommand, srtURLs)
-	return joinCommandArgs([]string{"sh", "-c", script})
+	args := []string{"/usr/local/bin/republish-srt", "--proxy-url", proxyURL, "--"}
+	args = append(args, srtURLs...)
+	return joinCommandArgs(args)
 }
 
 func joinCommandArgs(args []string) string {
@@ -467,42 +442,6 @@ func shellQuote(value string) string {
 	}
 	escaped := strings.ReplaceAll(value, "'", `'"'"'`)
 	return "'" + escaped + "'"
-}
-
-func buildRepublishScript(ffmpegCommand string, srtURLs []string) string {
-	if len(srtURLs) == 0 {
-		return strings.Join([]string{
-			`echo "[uplink] nenhum SRT candidate disponível"`,
-			"exit 1",
-		}, "\n")
-	}
-	quotedCandidates := make([]string, 0, len(srtURLs))
-	for _, srtURL := range srtURLs {
-		quotedCandidates = append(quotedCandidates, shellQuote(srtURL))
-	}
-	candidates := strings.Join(quotedCandidates, " ")
-	lines := []string{
-		"set -eu",
-		"backoff=${UPLINK_SRT_RETRY_BACKOFF_SECONDS:-2}",
-		`case "$backoff" in`,
-		`  ""|*[!0-9]*) backoff=2 ;;`,
-		"esac",
-		fmt.Sprintf("for candidate in %s; do", candidates),
-		`  echo "[uplink] trying SRT candidate: $candidate"`,
-		fmt.Sprintf("  if %s \"$candidate\"; then", ffmpegCommand),
-		"    exit 0",
-		"  fi",
-		"  status=$?",
-		`  case "$status" in`,
-		`    ""|*[!0-9]*) status=127 ;;`,
-		"  esac",
-		`  echo "[uplink] SRT candidate failed (exit $status): $candidate"`,
-		"  sleep \"$backoff\"",
-		"done",
-		`echo "[uplink] all SRT candidates failed"`,
-		"exit 1",
-	}
-	return strings.Join(lines, "\n")
 }
 
 func retentionForCamera(info core.CameraInfo, defaultRetention time.Duration) time.Duration {
@@ -744,13 +683,6 @@ func formatDuration(duration time.Duration) string {
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
-	}
-	return def
-}
-
-func parseArgsEnv(key string, def []string) []string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return strings.Fields(v)
 	}
 	return def
 }

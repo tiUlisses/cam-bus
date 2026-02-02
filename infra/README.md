@@ -55,12 +55,37 @@ No modo `UPLINK_MODE=mediamtx`, o republish é feito pelo MediaMTX proxy usando
 
 - `record: yes` herdado de `pathDefaults` (ex.: `infra/mediamtx/proxy/mediamtx.yml`);
 - `sourceOnDemand: no` para o proxy conectar na origem e disparar `runOnReady`;
-- `runOnReady` chamando FFmpeg com `-c copy` e `streamid=publish:<centralPath>`.
+- `runOnReady` chamando o helper `republish-srt` para tentar candidatos SRT em sequência.
 
 Quando há múltiplos candidatos SRT, o `runOnReady` executa um wrapper que tenta
 cada URL em sequência, registra no log qual candidato foi usado e o motivo da
 falha (código de saída do FFmpeg), e aguarda um pequeno backoff entre tentativas.
 O backoff pode ser ajustado via `UPLINK_SRT_RETRY_BACKOFF_SECONDS` (default: 2s).
+
+### Helper de republish (proxy)
+
+No proxy, o helper fica disponível em `/usr/local/bin/republish-srt` (copiado do
+`infra/mediamtx/proxy/republish-srt.sh`) e aceita o proxy RTSP e candidatos SRT
+via argumentos ou variáveis de ambiente.
+
+Exemplos:
+
+```bash
+/usr/local/bin/republish-srt --proxy-url rtsp://localhost:8554/camera-001 -- \
+  srt://central:8890?streamid=publish:acme/hq/camera-001 \
+  srt://central:8891?streamid=publish:acme/hq/camera-001
+```
+
+```bash
+UPLINK_SRT_CANDIDATES="srt://central:8890?streamid=publish:acme/hq/camera-001 srt://central:8891?streamid=publish:acme/hq/camera-001" \
+  /usr/local/bin/republish-srt --proxy-url rtsp://localhost:8554/camera-001
+```
+
+Variáveis suportadas:
+
+- `UPLINK_SRT_CANDIDATES`: lista (separada por espaço, vírgula ou `;`) de URLs SRT.
+- `UPLINK_SRT_RETRY_BACKOFF_SECONDS`: backoff entre tentativas (default: 2s).
+- `UPLINK_FFMPEG_GLOBAL_ARGS`, `UPLINK_FFMPEG_INPUT_ARGS`, `UPLINK_FFMPEG_OUTPUT_ARGS`: ajustes no comando FFmpeg.
 
 No modo `UPLINK_MODE=central-pull`, o central consome o RTSP direto do proxy,
 sem republish via FFmpeg. O cam-bus passa a gerar o `mediamtx.yml` do central
@@ -77,6 +102,9 @@ Requisitos de conectividade:
 - O MediaMTX central precisa alcançar o proxy via RTSP (porta 8554).
 - Configure `UPLINK_PROXY_RTSP_BASE` no central para apontar para o host/porta
   do proxy (ex.: `rtsp://proxy.mediamtx.local:8554`).
+
+Recomendação: use `UPLINK_MODE=central-pull` quando o SRT estiver instável ou
+quando a central puder consumir RTSP direto do proxy.
 
 É possível ajustar os argumentos do FFmpeg nos dois modos (container e mediamtx):
 
