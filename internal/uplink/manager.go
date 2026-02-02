@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -279,20 +280,9 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	}
 
 	proxyURL := fmt.Sprintf("%s/%s", m.proxyRTSPBase, strings.TrimPrefix(req.ProxyPath, "/"))
+	srtCandidates := BuildSRTURLCandidates(req.CentralHost, req.CentralSRTPort, req.CentralPath)
 	containerName := container.NameForCentralPath(req.CentralPath)
-	srtCandidates, err := BuildSRTURLCandidates(req.CentralHost, req.CentralSRTPort, req.CentralPath)
-	if err != nil {
-		log.Printf("[uplink] srt candidates indisponíveis camera=%s host=%q path=%q err=%v", cameraKey, req.CentralHost, req.CentralPath, err)
-		m.notifyStatus(Status{
-			CameraID:      req.CameraID,
-			CentralPath:   req.CentralPath,
-			ContainerName: containerName,
-			State:         "error",
-			ExitCode:      0,
-			Error:         err.Error(),
-		})
-		return err
-	}
+
 	if m.mode == uplinkModeMediaMTX || m.mode == uplinkModeCentralPull {
 		srtURL := ""
 		if len(srtCandidates) > 0 {
@@ -329,17 +319,7 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 
 	startCtx := context.Background()
 	if len(srtCandidates) == 0 {
-		err := fmt.Errorf("nenhuma url SRT disponível")
-		log.Printf("[uplink] %v camera=%s host=%q path=%q", err, cameraKey, req.CentralHost, req.CentralPath)
-		m.notifyStatus(Status{
-			CameraID:      req.CameraID,
-			CentralPath:   req.CentralPath,
-			ContainerName: containerName,
-			State:         "error",
-			ExitCode:      0,
-			Error:         err.Error(),
-		})
-		return err
+		srtCandidates = []string{""}
 	}
 	var (
 		containerID string
