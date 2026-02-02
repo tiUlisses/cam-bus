@@ -403,8 +403,10 @@ func pathConfigFor(info core.CameraInfo, rtspURL string, defaultRetention time.D
 	}
 
 	if republishOnReady && info.CentralHost != "" && info.CentralPath != "" {
-		cfg.RunOnReady = buildRepublishCommand(proxyRTSPBase, info)
-		cfg.RunOnReadyRestart = true
+		if cmd := buildRepublishCommand(proxyRTSPBase, info); cmd != "" {
+			cfg.RunOnReady = cmd
+			cfg.RunOnReadyRestart = true
+		}
 	}
 
 	if !info.RecordEnabled {
@@ -427,7 +429,15 @@ func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
 		proxyPath = strings.Trim(strings.TrimSpace(info.DeviceID), "/")
 	}
 	proxyURL := fmt.Sprintf("%s/%s", strings.TrimSuffix(proxyRTSPBase, "/"), proxyPath)
-	srtURLs := uplink.BuildSRTURLCandidates(info.CentralHost, info.CentralSRTPort, info.CentralPath)
+	srtURLs, err := uplink.BuildSRTURLCandidates(info.CentralHost, info.CentralSRTPort, info.CentralPath)
+	if err != nil {
+		log.Printf("[mediamtx] srt candidates indisponíveis host=%q path=%q err=%v", info.CentralHost, info.CentralPath, err)
+		return ""
+	}
+	if len(srtURLs) == 0 {
+		log.Printf("[mediamtx] srt candidates vazios host=%q path=%q", info.CentralHost, info.CentralPath)
+		return ""
+	}
 	globalArgs := parseArgsEnv("UPLINK_FFMPEG_GLOBAL_ARGS", defaultFFmpegGlobalArgs)
 	inputArgs := parseArgsEnv("UPLINK_FFMPEG_INPUT_ARGS", defaultFFmpegInputArgs)
 	outputArgs := parseArgsEnv("UPLINK_FFMPEG_OUTPUT_ARGS", defaultFFmpegOutputArgs)
@@ -437,10 +447,6 @@ func buildRepublishCommand(proxyRTSPBase string, info core.CameraInfo) string {
 	baseArgs = append(baseArgs, inputArgs...)
 	baseArgs = append(baseArgs, "-i", proxyURL)
 	baseArgs = append(baseArgs, outputArgs...)
-
-	if len(srtURLs) == 0 {
-		srtURLs = []string{""}
-	}
 
 	ffmpegCommand := joinCommandArgs(baseArgs)
 	script := buildRepublishScript(ffmpegCommand, srtURLs)
@@ -464,6 +470,12 @@ func shellQuote(value string) string {
 }
 
 func buildRepublishScript(ffmpegCommand string, srtURLs []string) string {
+	if len(srtURLs) == 0 {
+		return strings.Join([]string{
+			`echo "[uplink] nenhum SRT candidate disponível"`,
+			"exit 1",
+		}, "\n")
+	}
 	quotedCandidates := make([]string, 0, len(srtURLs))
 	for _, srtURL := range srtURLs {
 		quotedCandidates = append(quotedCandidates, shellQuote(srtURL))
