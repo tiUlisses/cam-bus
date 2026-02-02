@@ -280,17 +280,30 @@ func (m *Manager) startUplink(cameraKey string, req Request) error {
 	}
 
 	proxyURL := fmt.Sprintf("%s/%s", m.proxyRTSPBase, strings.TrimPrefix(req.ProxyPath, "/"))
-	srtCandidates := BuildSRTURLCandidates(req.CentralHost, req.CentralSRTPort, req.CentralPath)
 	containerName := container.NameForCentralPath(req.CentralPath)
+	if m.mode == uplinkModeMediaMTX {
+		containerName = "mediamtx-proxy"
+	} else if m.mode == uplinkModeCentralPull {
+		containerName = "central-pull"
+	}
+	srtCandidates, err := BuildSRTURLCandidates(req.CentralHost, req.CentralSRTPort, req.CentralPath)
+	if err != nil {
+		log.Printf("[uplink] srt candidates indisponíveis host=%q path=%q err=%v", req.CentralHost, req.CentralPath, err)
+		m.notifyStatus(Status{
+			CameraID:      req.CameraID,
+			CentralPath:   req.CentralPath,
+			ContainerName: containerName,
+			State:         "error",
+			ExitCode:      0,
+			Error:         err.Error(),
+		})
+		return fmt.Errorf("build srt candidates: %w", err)
+	}
 
 	if m.mode == uplinkModeMediaMTX || m.mode == uplinkModeCentralPull {
 		srtURL := ""
 		if len(srtCandidates) > 0 {
 			srtURL = srtCandidates[0]
-		}
-		containerName := "mediamtx-proxy"
-		if m.mode == uplinkModeCentralPull {
-			containerName = "central-pull"
 		}
 		proc := &uplinkProcess{
 			cameraKey:       cameraKey,
