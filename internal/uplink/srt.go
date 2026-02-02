@@ -34,11 +34,10 @@ const (
 	srtProfileQuality  = "quality"
 )
 
-func BuildSRTURLCandidates(host string, port int, path string) []string {
+func BuildSRTURLCandidates(host string, port int, path string) ([]string, error) {
 	normalizedHost, normalizedPort, normalizedPath, err := normalizeSRTInputs(host, port, path)
 	if err != nil {
-		log.Printf("[uplink] host/path inválidos para SRT (host=%q path=%q): %v", host, path, err)
-		return nil
+		return nil, fmt.Errorf("normalizar entradas SRT: %w", err)
 	}
 	options := srtOptionsFromEnv()
 	candidates := srtOptionCandidates(options)
@@ -57,7 +56,10 @@ func BuildSRTURLCandidates(host string, port int, path string) []string {
 			urls = append(urls, srtURL)
 		}
 	}
-	return urls
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("nenhuma url SRT válida gerada")
+	}
+	return urls, nil
 }
 
 func buildSRTURLVariants(host string, port int, path string, opts SRTQueryOptions) []string {
