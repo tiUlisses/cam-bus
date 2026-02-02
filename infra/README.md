@@ -62,6 +62,12 @@ cada URL em sequência, registra no log qual candidato foi usado e o motivo da
 falha (código de saída do FFmpeg), e aguarda um pequeno backoff entre tentativas.
 O backoff pode ser ajustado via `UPLINK_SRT_RETRY_BACKOFF_SECONDS` (default: 2s).
 
+> **Importante:** o helper `republish-srt` precisa existir no container do proxy.
+> O `docker-compose.yml` usa o `./proxy/Dockerfile` para garantir que o script
+> esteja em `/usr/local/bin/republish-srt`. Se usar outra imagem, copie o script
+> para o mesmo caminho ou monte-o via volume. Sem isso, o MediaMTX logará:
+> `runOnReady command exited: fork/exec /usr/local/bin/republish-srt: no such file or directory`.
+
 ### Helper de republish (proxy)
 
 No proxy, o helper fica disponível em `/usr/local/bin/republish-srt` (copiado do
@@ -205,6 +211,38 @@ Se preferir manter o modo atual, use:
 
 ```bash
 UPLINK_MODE=container
+```
+
+## Estratégia robusta de uplink SRT (link instável ou baixa banda)
+
+Para ambientes com perda, jitter ou banda reduzida, combine estes itens:
+
+1. **Múltiplos candidatos SRT** (ex.: duas portas no central) para fallback
+   automático quando o primeiro destino falhar.
+2. **Perfil de qualidade** com `latency` maior para tolerância a jitter.
+3. **Perfil de compatibilidade** (`UPLINK_SRT_COMPAT_PROFILE=true`) para uma
+   tentativa extra com parâmetros mais conservadores.
+4. **Limite de banda e buffers** coerentes com o link (evita saturação).
+5. **Fallback para `central-pull`** quando o SRT ficar instável e o central puder
+   consumir RTSP direto do proxy.
+
+Exemplo recomendado para link instável (baixa banda, mais tolerância a jitter):
+
+```bash
+UPLINK_SRT_PROFILE=quality
+UPLINK_SRT_LATENCY=400
+UPLINK_SRT_MAXBW=4000000
+UPLINK_SRT_RCVBUF=8388608
+UPLINK_SRT_SNDBUF=8388608
+UPLINK_SRT_TLPKTDROP=true
+UPLINK_SRT_COMPAT_PROFILE=true
+```
+
+Se o link continuar instável, prefira o modo `central-pull`:
+
+```bash
+UPLINK_MODE=central-pull
+UPLINK_PROXY_RTSP_BASE=rtsp://proxy.mediamtx.local:8554
 ```
 
 ## MediaMTX Central com paths dinâmicos
