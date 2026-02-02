@@ -63,12 +63,14 @@ func BuildSRTURLCandidates(host string, port int, path string) []string {
 func buildSRTURLVariants(host string, port int, path string, opts SRTQueryOptions) []string {
 	streamID := streamIDForPath(path)
 	queryValues := buildSRTQueryValues(streamID, opts)
-	urls := []string{buildSRTURL(host, port, queryValues.Encode())}
 	if isSafeRawStreamID(streamID) {
 		rawQuery := buildSRTQueryWithRawStreamID(queryValues, streamID)
-		urls = append(urls, buildSRTURL(host, port, rawQuery))
+		return []string{
+			buildSRTURL(host, port, rawQuery),
+			buildSRTURL(host, port, queryValues.Encode()),
+		}
 	}
-	return urls
+	return []string{buildSRTURL(host, port, queryValues.Encode())}
 }
 
 func buildSRTQueryValues(streamID string, opts SRTQueryOptions) url.Values {
