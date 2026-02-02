@@ -66,8 +66,9 @@ for candidate in $candidate_list; do
   echo "[uplink] trying SRT candidate: $candidate"
   if ffmpeg $global_args $input_args -i "$proxy_url" $output_args "$candidate"; then
     exit 0
+  else
+    status=$?
   fi
-  status=$?
   case "$status" in
     ""|*[!0-9]*)
       status=127
