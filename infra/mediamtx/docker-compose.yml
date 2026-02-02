@@ -2,7 +2,9 @@ version: "3.9"
 
 services:
   mtx-proxy:
-    image: bluenviron/mediamtx:latest-ffmpeg
+    build:
+      context: ./proxy
+    image: cam-bus/mediamtx-proxy:latest
     container_name: mtx-proxy
     volumes:
       - ./proxy/mediamtx.yml:/mediamtx.yml:rw
